@@ -404,30 +404,117 @@ function NotesPanel({ readOnly }: { readOnly?: boolean }) {
 }
 
 /* ========= Files (unchanged editor modal; already supports open/edit/save/delete) ========= */
-type Uploaded = { id: string; name: string; size: number; type: string; content: string };
+type Uploaded = {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  isText: boolean;
+  text?: string;        // for text-like files
+  dataUrl?: string;     // for images/pdf/audio/video/unknown
+};
+
+function blobFromUpload(u: Uploaded): Blob {
+  if (u.isText) {
+    const mime = u.type || "text/plain;charset=utf-8";
+    return new Blob([u.text ?? ""], { type: mime });
+  }
+  // dataUrl → Blob
+  const arr = u.dataUrl?.split(",") ?? [];
+  if (arr.length < 2) return new Blob([], { type: u.type });
+  const bstr = atob(arr[1]);
+  const u8 = new Uint8Array(bstr.length);
+  for (let i = 0; i < bstr.length; i++) u8[i] = bstr.charCodeAt(i);
+  return new Blob([u8], { type: u.type || "application/octet-stream" });
+}
+
+function downloadUploaded(u: Uploaded) {
+  const blob = blobFromUpload(u);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = u.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function FilesPanel({ readOnly }: { readOnly?: boolean }) {
   const [files, setFiles] = useState<Uploaded[]>([]);
   const [active, setActive] = useState<Uploaded | null>(null);
-  const [draftName, setDraftName] = useState(""); const [draftContent, setDraftContent] = useState("");
+  const [draftName, setDraftName] = useState(""); 
+  const [draftText, setDraftText] = useState("");
 
   const onUpload = (fl: FileList | null) => {
     if (!fl || readOnly) return;
     Array.from(fl).forEach((f) => {
-      const r = new FileReader();
-      r.onload = () => {
-        setFiles((prev) => [...prev, { id: crypto.randomUUID(), name: f.name, size: f.size, type: f.type, content: typeof r.result === "string" ? r.result : "" }]);
+      // decide reading mode
+      const isTextLike =
+        f.type.startsWith("text/") ||
+        ["application/json", "application/xml", "application/javascript"].includes(f.type) ||
+        /\.(md|txt|json|xml|csv|log|ts|tsx|js|jsx|css|html)$/i.test(f.name);
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        setFiles((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            name: f.name,
+            size: f.size,
+            type: f.type || (isTextLike ? "text/plain" : "application/octet-stream"),
+            isText: isTextLike,
+            text: isTextLike ? (reader.result as string) : undefined,
+            dataUrl: !isTextLike ? (reader.result as string) : undefined,
+          },
+        ]);
       };
-      r.readAsText(f);
+      if (isTextLike) reader.readAsText(f);
+      else reader.readAsDataURL(f);
     });
   };
 
-  const openFile = (f: Uploaded) => { setActive(f); setDraftName(f.name); setDraftContent(f.content); };
+  const openFile = (f: Uploaded) => {
+    setActive(f);
+    setDraftName(f.name);
+    setDraftText(f.text ?? "");
+  };
   const saveFile = () => {
     if (!active) return;
-    setFiles((prev) => prev.map((x) => (x.id === active.id ? { ...x, name: draftName, content: draftContent } : x)));
+    setFiles((prev) =>
+      prev.map((x) =>
+        x.id === active.id ? { ...x, name: draftName, text: active.isText ? draftText : x.text } : x
+      )
+    );
     setActive(null);
   };
   const deleteFile = (id: string) => setFiles((prev) => prev.filter((x) => x.id !== id));
+
+  // Simple preview renderer by MIME
+  const renderPreview = (f: Uploaded) => {
+    if (f.isText) {
+      return (
+        <textarea
+          className="w-full h-64 p-3 border rounded-lg outline-none"
+          value={draftText}
+          onChange={(e) => setDraftText(e.target.value)}
+        />
+      );
+    }
+    if (!f.dataUrl) return <div className="text-sm text-gray-600">No preview available.</div>;
+
+    if (f.type.startsWith("image/")) return <img src={f.dataUrl} alt={f.name} className="max-h-96 object-contain rounded" />;
+    if (f.type === "application/pdf")
+      return <iframe title={f.name} src={f.dataUrl} className="w-full h-96 rounded border" />;
+    if (f.type.startsWith("audio/")) return <audio controls src={f.dataUrl} className="w-full" />;
+    if (f.type.startsWith("video/")) return <video controls src={f.dataUrl} className="w-full max-h-96 rounded" />;
+    return (
+      <div className="text-sm text-gray-600">
+        Preview not supported. You can download the file to view locally.
+      </div>
+    );
+  };
 
   return (
     <div className="h-full p-4">
@@ -435,14 +522,16 @@ function FilesPanel({ readOnly }: { readOnly?: boolean }) {
         <input type="file" multiple className="hidden" disabled={readOnly} onChange={(e) => onUpload(e.target.files)} />
         Drag & drop or click to upload {readOnly && "(disabled in demo)"}
       </label>
+
       <ul className="mt-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {files.map((f) => (
           <li key={f.id} className="border rounded-xl p-3 bg-white">
-            <div className="font-medium text-sm truncate">{f.name}</div>
-            <div className="text-xs text-gray-500">{(f.size / 1024).toFixed(1)} KB</div>
+            <div className="font-medium text-sm truncate" title={f.name}>{f.name}</div>
+            <div className="text-xs text-gray-500">{(f.size / 1024).toFixed(1)} KB • {f.type || "file"}</div>
             <div className="mt-2 flex gap-2">
-              <BtnSecondary className="h-8" onClick={() => openFile(f)} disabled={readOnly}>Open</BtnSecondary>
-              <Button className="h-8 border" onClick={() => deleteFile(f.id)} disabled={readOnly}>Delete</Button>
+              <button className="btn-secondary h-8" onClick={() => openFile(f)} disabled={readOnly}>Open</button>
+              <button className="btn h-8 border" onClick={() => downloadUploaded(f)}>Download</button>
+              <button className="btn h-8 border" onClick={() => deleteFile(f.id)} disabled={readOnly}>Delete</button>
             </div>
           </li>
         ))}
@@ -451,25 +540,37 @@ function FilesPanel({ readOnly }: { readOnly?: boolean }) {
       <Modal
         isOpen={!!active}
         onClose={() => setActive(null)}
-        title="Edit file"
+        title={active ? `Preview: ${active.name}` : "Preview"}
         footer={
-          <div className="flex justify-end gap-2">
-            <BtnSecondary onClick={() => setActive(null)}>Cancel</BtnSecondary>
-            <BtnPrimary onClick={saveFile} disabled={readOnly}>Save</BtnPrimary>
+          <div className="flex justify-between items-center">
+            {active && (
+              <button className="btn border" onClick={() => downloadUploaded(active)}>
+                Download
+              </button>
+            )}
+            <div className="ml-auto flex gap-2">
+              <button className="btn-secondary" onClick={() => setActive(null)}>Close</button>
+              {active?.isText && (
+                <button className="btn-primary" onClick={saveFile} disabled={readOnly}>Save</button>
+              )}
+            </div>
           </div>
         }
       >
-        <div className="grid gap-3">
-          <div className="grid sm:grid-cols-[1fr,auto] gap-2 items-center">
-            <input className="input" value={draftName} onChange={(e) => setDraftName(e.target.value)} disabled={readOnly}/>
-            <span className="text-xs text-gray-500">{active?.type || "text"}</span>
+        {active && (
+          <div className="grid gap-3">
+            <div className="grid sm:grid-cols-[1fr,auto] gap-2 items-center">
+              <input className="input" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
+              <span className="text-xs text-gray-500">{active.type || "file"}</span>
+            </div>
+            {renderPreview(active)}
           </div>
-          <textarea className="w-full h-64 p-3 border rounded-lg outline-none" value={draftContent} onChange={(e) => setDraftContent(e.target.value)} />
-        </div>
+        )}
       </Modal>
     </div>
   );
 }
+
 
 /* ========= Tree view ========= */
 function TreeView({ node, selectedPath, onSelect, onToggle }: {
