@@ -1,0 +1,122 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id              String      @id @default(cuid())
+  name            String
+  email           String      @unique
+  createdAt       DateTime    @default(now())
+  memberships     Member[]
+  ownedWorkspaces Workspace[] @relation("WorkspaceOwner")
+  messages        Message[]
+  tasks           Task[]      @relation("TaskCreator")
+  files           File[]      @relation("FileCreator")
+  updatedNotes    Note[]      @relation("NoteUpdater")
+}
+
+model Workspace {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  deadline    DateTime?
+  createdAt   DateTime  @default(now())
+  ownerId     String
+  owner       User      @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+  members     Member[]
+  tasks       Task[]
+  notes       Note?
+  files       File[]
+  channels    Channel[]
+  audits      Audit[]
+}
+
+model Member {
+  id          String    @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        Role      @default(EDITOR)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  user        User      @relation(fields: [userId], references: [id])
+
+  @@unique([workspaceId, userId])
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+model Channel {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  type        String    @default("general")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  messages    Message[]
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  channelId String
+  authorId  String
+  text      String
+  createdAt DateTime @default(now())
+  channel   Channel  @relation(fields: [channelId], references: [id])
+  author    User     @relation(fields: [authorId], references: [id])
+}
+
+model Task {
+  id          String    @id @default(cuid())
+  workspaceId String
+  title       String
+  status      String    @default("todo")
+  due         DateTime?
+  createdAt   DateTime  @default(now())
+  createdById String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  createdBy   User      @relation("TaskCreator", fields: [createdById], references: [id])
+}
+
+model Note {
+  id          String    @id @default(cuid())
+  workspaceId String    @unique
+  content     String    @default("")
+  version     Int       @default(1)
+  updatedById String?
+  updatedAt   DateTime  @updatedAt
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  updatedBy   User?     @relation("NoteUpdater", fields: [updatedById], references: [id])
+}
+
+model File {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  mime        String
+  size        Int
+  storageKey  String
+  createdById String
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  createdBy   User      @relation("FileCreator", fields: [createdById], references: [id])
+}
+
+model Audit {
+  id          String    @id @default(cuid())
+  workspaceId String
+  actorId     String
+  action      String
+  entity      String
+  entityId    String
+  diff        Json?
+  at          DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+}

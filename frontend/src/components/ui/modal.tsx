@@ -1,7 +1,6 @@
 // src/components/ui/modal.tsx
 import React, { ReactNode } from "react";
 
-
 export default function Modal({
   isOpen,
   onClose,
