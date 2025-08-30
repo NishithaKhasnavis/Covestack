@@ -1,5 +1,4 @@
-// src/lib/notes.ts
-import { API_BASE } from "@/lib/api";
+import { apiRaw } from "./api";
 
 export type NotesDoc = {
   id: string;
@@ -7,11 +6,18 @@ export type NotesDoc = {
   content: string;
   version: number;
   updatedAt: string;
-  updatedById: string | null;
+  updatedById?: string | null;
 };
 
-type SaveOk = { ok: true; etag: string; doc: NotesDoc };
-type SaveConflict = {
+export async function getNotes(workspaceId: string): Promise<{ etag: string; doc: NotesDoc }> {
+  const res = await apiRaw(`/workspaces/${workspaceId}/notes`, { method: "GET" });
+  const etag = res.headers.get("ETag") || "";
+  const doc = (await res.json()) as NotesDoc;
+  return { etag, doc };
+}
+
+export type SaveNotesOk = { ok: true; etag: string; doc: NotesDoc };
+export type SaveNotesConflict = {
   ok: false;
   type: "conflict";
   etag: string;
@@ -19,35 +25,41 @@ type SaveConflict = {
   expected: number;
   currentVersion: number;
 };
-export type SaveNotesResult = SaveOk | SaveConflict;
+export type SaveNotesResult = SaveNotesOk | SaveNotesConflict;
 
-export async function getNotes(workspaceId: string): Promise<{ etag: string; doc: NotesDoc }> {
-  const res = await fetch(`${API_BASE}/workspaces/${workspaceId}/notes`, { credentials: "include" });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return { etag: res.headers.get("etag") || "", doc: await res.json() as NotesDoc };
-}
-
-export async function saveNotes(workspaceId: string, content: string, etag: string): Promise<SaveNotesResult> {
-  const res = await fetch(`${API_BASE}/workspaces/${workspaceId}/notes`, {
+export async function saveNotes(
+  workspaceId: string,
+  content: string,
+  etag: string
+): Promise<SaveNotesResult> {
+  const res = await apiRaw(`/workspaces/${workspaceId}/notes`, {
     method: "PUT",
-    credentials: "include",
-    headers: { "Content-Type": "application/json", "If-Match": etag },
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": etag,
+    },
     body: JSON.stringify({ content }),
   });
 
   if (res.status === 200) {
-    return { ok: true, etag: res.headers.get("etag") || "", doc: await res.json() as NotesDoc };
+    const newEtag = res.headers.get("ETag") || "";
+    const doc = (await res.json()) as NotesDoc;
+    return { ok: true, etag: newEtag, doc };
   }
+
   if (res.status === 409) {
-    const data = await res.json().catch(() => ({}));
+    const body = await res.json();
+    // { message, expected, currentVersion, current }
     return {
       ok: false,
       type: "conflict",
-      etag: res.headers.get("etag") || "",
-      server: data.current,
-      expected: data.expected,
-      currentVersion: data.currentVersion,
+      etag: res.headers.get("ETag") || "",
+      server: body.current as NotesDoc,
+      expected: body.expected,
+      currentVersion: body.currentVersion,
     };
   }
-  throw new Error(`${res.status} ${res.statusText}`);
+
+  const text = await res.text().catch(() => "");
+  throw new Error(`${res.status} ${res.statusText}: ${text || "saveNotes"}`);
 }

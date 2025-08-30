@@ -1,49 +1,42 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { signIn } from "@/lib/auth";
+import { ensureSession, signIn } from "@/lib/auth";
 
 export default function SignIn() {
   const nav = useNavigate();
-  const [email, setEmail] = useState("you@virginia.edu");
-  const [name, setName] = useState("Nishitha");
-  const [code, setCode] = useState(""); // matches ACCESS_CODE in backend .env
-  const [loading, setLoading] = useState(false);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [passcode, setPasscode] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  async function onSubmit(e: React.FormEvent) {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
-    setLoading(true);
+    setBusy(true);
     try {
-      await signIn(name.trim(), email.trim(), code.trim());
+      signIn(name.trim() || email.trim(), email.trim(), passcode.trim());
+      await ensureSession(); // sets cookie on the server
       nav("/dashboard");
     } catch (e: any) {
-      setErr(e?.message || "Sign-in failed");
+      setErr(e?.message || String(e));
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
-  }
+  };
 
   return (
     <div className="min-h-screen grid place-items-center bg-gray-50">
-      <form onSubmit={onSubmit} className="w-full max-w-sm bg-white border rounded-2xl p-6 shadow-soft">
-        <h1 className="text-xl font-semibold mb-4">Sign in to CoveStack</h1>
-        <div className="grid gap-3">
-          <input className="input" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} />
-          <input className="input" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
-          <input
-            className="input"
-            placeholder="Access code"
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-          />
-          {err ? <p className="text-sm text-red-600">{err}</p> : null}
-          <button className="btn-primary" disabled={loading || !email || !code}>
-            {loading ? "Signing in…" : "Sign in"}
-          </button>
-          <p className="text-xs text-gray-500">
-            Tip: access code must match your backend <code>ACCESS_CODE</code> in <code>.env</code> (e.g. <code>letmein-123</code>).
-          </p>
+      <form className="w-full max-w-md bg-white border rounded-xl p-6 shadow-soft" onSubmit={submit}>
+        <h1 className="text-xl font-semibold">Sign in</h1>
+        <p className="text-sm text-gray-600 mt-1">Local passcode auth for dev.</p>
+
+        <div className="grid gap-3 mt-4">
+          <input className="input" placeholder="Full name" value={name} onChange={e => setName(e.target.value)} />
+          <input className="input" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} />
+          <input className="input" placeholder="Passcode" value={passcode} onChange={e => setPasscode(e.target.value)} />
+          {err && <div className="text-sm text-red-600">{err}</div>}
+          <button className="btn-primary h-10" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
         </div>
       </form>
     </div>

@@ -1,56 +1,65 @@
-// src/lib/api.ts
 // Generic fetch helpers (JSON + cookie auth)
 
-// Safe detection for both Vite and Next without touching undefined globals
 const viteBase =
-  typeof import.meta !== "undefined" && (import.meta as any)?.env?.VITE_API_BASE;
+  typeof import.meta !== "undefined" &&
+  (import.meta as any)?.env?.VITE_API_BASE;
+
 const nextBase =
-  typeof process !== "undefined" && (process as any)?.env?.NEXT_PUBLIC_API_BASE;
+  typeof process !== "undefined" &&
+  (process as any)?.env?.NEXT_PUBLIC_API_BASE;
 
-export const API_BASE: string = (viteBase || nextBase || "http://localhost:3000") as string;
+export const API_BASE: string =
+  (viteBase || nextBase || "http://localhost:3000") as string;
 
-// (optional) one-time log
+// Optional debug
 if (typeof window !== "undefined") {
   console.log("[API_BASE]", API_BASE);
 }
 
-function buildHeaders(opts: RequestInit) {
-  // Use the browser Headers object to avoid TS issues with HeadersInit
-  const headers = new Headers(opts.headers ?? {});
-  const hasBody = opts.body !== undefined && opts.body !== null;
-
-  // Don’t set JSON content-type if:
-  //  - there is no body
-  //  - or the body is FormData (browser sets the boundary)
-  const isForm =
-    typeof FormData !== "undefined" && hasBody && opts.body instanceof FormData;
-
-  if (hasBody && !isForm && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  return headers;
+function defaultHeaders(init?: HeadersInit, hasBody?: boolean): HeadersInit {
+  const h = new Headers(init || {});
+  // only set Content-Type if we are actually sending a body
+  if (hasBody && !h.has("Content-Type")) h.set("Content-Type", "application/json");
+  return h;
 }
 
-export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
+export async function api<T>(
+  path: string,
+  opts: RequestInit & { json?: any } = {}
+): Promise<T> {
+  const { json, ...rest } = opts;
+  const hasBody = json !== undefined || rest.body !== undefined;
+
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
-    ...opts,
-    headers: buildHeaders(opts),
+    headers: defaultHeaders(rest.headers, hasBody),
+    ...(json !== undefined ? { body: JSON.stringify(json), method: rest.method ?? "POST" } : {}),
+    ...rest,
   });
+
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}: ${text || path}`);
   }
+  // Some endpoints (signout) send 204
+  if (res.status === 204) return undefined as unknown as T;
   return res.json() as Promise<T>;
 }
 
-// When you need headers (e.g., ETag) or non-JSON
-export async function apiRaw(path: string, opts: RequestInit = {}) {
+export async function apiRaw(
+  path: string,
+  opts: RequestInit & { json?: any } = {}
+) {
+  const { json, ...rest } = opts;
+  const hasBody = json !== undefined || rest.body !== undefined;
+
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
-    ...opts,
-    headers: buildHeaders(opts),
+    headers: defaultHeaders(rest.headers, hasBody),
+    ...(json !== undefined ? { body: JSON.stringify(json), method: rest.method ?? "POST" } : {}),
+    ...rest,
   });
+
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}: ${text || path}`);

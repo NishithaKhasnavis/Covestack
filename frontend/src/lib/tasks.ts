@@ -1,39 +1,31 @@
 import { api } from "./api";
 
+export type TaskStatus = "todo" | "in_progress" | "done";
 export type Task = {
   id: string;
   workspaceId: string;
   title: string;
-  status: "todo" | "in_progress" | "done";
-  due: string | null;
+  status: TaskStatus;
+  due?: string | null; // ISO date (YYYY-MM-DD) or null
   createdAt: string;
-  createdById: string;
+  updatedAt: string;
 };
 
-export function listTasks(workspaceId: string) {
-  return api<Task[]>(`/workspaces/${workspaceId}/tasks`);
+export async function listTasks(workspaceId: string): Promise<Task[]> {
+  return api<Task[]>(`/workspaces/${workspaceId}/tasks`, { method: "GET" });
 }
 
-export function createTask(
+export async function createTask(
   workspaceId: string,
-  input: { title: string; status?: Task["status"]; due?: string }
+  p: { title: string; status?: TaskStatus; due?: string }
 ) {
-  return api<Task>(`/workspaces/${workspaceId}/tasks`, {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
+  return api<Task>(`/workspaces/${workspaceId}/tasks`, { json: p });
 }
 
-export function updateTask(
-  taskId: string,
-  patch: Partial<Pick<Task, "title" | "status" | "due">>
-) {
-  return api<Task>(`/tasks/${taskId}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  });
+export async function updateTask(id: string, patch: Partial<Task>) {
+  return api<Task>(`/tasks/${id}`, { method: "PATCH", json: patch });
 }
 
-export function deleteTask(taskId: string) {
-  return api<{ ok: true }>(`/tasks/${taskId}`, { method: "DELETE" });
+export async function deleteTask(id: string) {
+  return api<void>(`/tasks/${id}`, { method: "DELETE" });
 }
