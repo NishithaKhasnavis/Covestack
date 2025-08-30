@@ -1,72 +1,46 @@
-// tiny client-side auth (localStorage-based, placeholder only)
-export type User = { id: string; name: string; email: string; passcode?: string };
-export type Workspace = { id: string; name: string; createdAt: string };
+// src/lib/auth.ts
+import { api } from "./api";
+
+export type User = { id: string; email: string; name?: string | null; passcode?: string };
 
 const USER_KEY = "cove:user";
-const WS_KEY = "cove:workspaces";
 
 export function getUser(): User | null {
   const raw = localStorage.getItem(USER_KEY);
   return raw ? (JSON.parse(raw) as User) : null;
 }
-
-export function setUser(u: User) {
-  localStorage.setItem(USER_KEY, JSON.stringify(u));
+export function setUser(u: User | null) {
+  if (u) localStorage.setItem(USER_KEY, JSON.stringify(u));
+  else localStorage.removeItem(USER_KEY);
 }
 
-export function signIn(name: string, email: string, passcode: string) {
-  const existing = getUser();
-  if (existing && existing.passcode) {
-    // placeholder check: compare raw passcode (NOT secure)
-    if (passcode !== existing.passcode) {
-      throw new Error("Incorrect passcode.");
-    }
-    // update basic profile fields if you changed them
-    setUser({ ...existing, name, email });
-    return;
-  }
-  // first-time setup (stores passcode on device)
-  const u: User = { id: crypto.randomUUID(), name, email, passcode };
-  setUser(u);
-
-  // seed demo workspaces if none exist
-  if (!localStorage.getItem(WS_KEY)) {
-    const seed: Workspace[] = [
-      { id: Math.random().toString(36).slice(2, 8), name: "Design Sprint", createdAt: new Date().toISOString() },
-      { id: Math.random().toString(36).slice(2, 8), name: "Hackathon Team", createdAt: new Date().toISOString() },
-    ];
-    localStorage.setItem(WS_KEY, JSON.stringify(seed));
+export async function ensureSession(): Promise<User | null> {
+  try {
+    const me = await api<{ id: string; email: string; iat?: number; exp?: number }>("/me");
+    const cached = getUser();
+    const u: User = { id: me.id, email: me.email, name: cached?.name ?? null };
+    setUser(u);
+    return u;
+  } catch {
+    setUser(null);
+    return null;
   }
 }
 
-export function updatePasscode(newPasscode: string) {
-  const u = getUser();
-  if (!u) return;
-  setUser({ ...u, passcode: newPasscode });
+export async function signIn(name: string, email: string, code: string) {
+  const u = await api<User>("/auth/signin", {
+    method: "POST",
+    body: JSON.stringify({ name, email, code }),
+  });
+  setUser({ id: u.id, email: u.email, name: u.name ?? name });
 }
 
-export function signOut() {
-  localStorage.removeItem(USER_KEY);
+export async function signOut() {
+  await api<{ ok: true }>("/auth/signout", { method: "POST" });
+  setUser(null);
 }
 
-export function listWorkspaces(): Workspace[] {
-  const raw = localStorage.getItem(WS_KEY);
-  return raw ? (JSON.parse(raw) as Workspace[]) : [];
-}
-
-export function createWorkspace(name: string): Workspace {
-  const ws: Workspace = { id: Math.random().toString(36).slice(2, 8), name, createdAt: new Date().toISOString() };
-  const all = [ws, ...listWorkspaces()];
-  localStorage.setItem(WS_KEY, JSON.stringify(all));
-  return ws;
-}
-
-export function renameWorkspace(id: string, name: string) {
-  const all = listWorkspaces().map((w) => (w.id === id ? { ...w, name } : w));
-  localStorage.setItem(WS_KEY, JSON.stringify(all));
-}
-
-export function deleteWorkspace(id: string) {
-  const all = listWorkspaces().filter((w) => w.id !== id);
-  localStorage.setItem(WS_KEY, JSON.stringify(all));
+// legacy no-op (server validates the passcode)
+export function updatePasscode(_newPasscode: string) {
+  /* no-op */
 }

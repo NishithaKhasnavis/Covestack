@@ -1,23 +1,36 @@
 // src/pages/CoveWorkspace.tsx
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 import Modal from "../components/ui/modal";
+
+import { ensureSession } from "@/lib/auth";
+import {
+  listTasks as apiListTasks,
+  createTask as apiCreateTask,
+  updateTask as apiUpdateTask,
+  deleteTask as apiDeleteTask,
+  Task, // { id, title, status: 'todo'|'in_progress'|'done', due? }
+} from "@/lib/tasks";
+import { getNotes, saveNotes, NotesDoc, SaveNotesResult } from "@/lib/notes";
+import {
+  listFiles as apiListFiles,
+  initUpload as apiInitUpload,
+  deleteFile as apiDeleteFile,
+  getDownloadUrl,
+  ServerFile,
+  InitUploadResponse,
+} from "@/lib/files";
 
 /* ========= Buttons ========= */
 const Button = ({ className = "", type = "button", ...p }: any) => (
   <button {...p} type={type} className={`btn ${className}`} />
 );
-const BtnPrimary = (p: any) => (
-  <Button {...p} className={`btn-primary ${p.className ?? ""}`} />
-);
-const BtnSecondary = (p: any) => (
-  <Button {...p} className={`btn-secondary ${p.className ?? ""}`} />
-);
+const BtnPrimary = (p: any) => <Button {...p} className={`btn-primary ${p.className ?? ""}`} />;
+const BtnSecondary = (p: any) => <Button {...p} className={`btn-secondary ${p.className ?? ""}`} />;
 
 /* ========= Types ========= */
 type Message = { id: string; author: string; text: string; at: string };
-type Task = { id: string; title: string; status: "todo" | "doing" | "done"; due?: string };
 type Member = { id: string; name: string; email: string };
 
 type FileLanguage =
@@ -98,9 +111,7 @@ function removeNodeById(root: FolderNode, targetId: string): FolderNode {
     if (node.children.length !== before) return true;
     let removed = false;
     node.children.forEach((c) => {
-      if (c.kind === "folder") {
-        removed = rec(c) || removed;
-      }
+      if (c.kind === "folder") removed = rec(c) || removed;
     });
     return removed;
   }
@@ -110,14 +121,14 @@ function removeNodeById(root: FolderNode, targetId: string): FolderNode {
 
 /* ========= Workspace data ========= */
 function useWorkspaceData() {
-  const [messages, setMessages] = useState<Message[]>([]); // empty initial chat
+  const [messages, setMessages] = useState<Message[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [members, setMembers] = useState<Member[]>([{ id: "u1", name: "You", email: "you@example.com" }]);
   const [overview, setOverview] = useState<{ description: string; deadline?: string }>({ description: "" });
   return { messages, setMessages, tasks, setTasks, members, setMembers, overview, setOverview };
 }
 
-/* ========= Sidebar (Home / Demo quick nav) ========= */
+/* ========= Sidebar ========= */
 function Sidebar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
   const items = ["Overview", "Chat", "Tasks", "Notes", "Files", "Code"] as const;
   return (
@@ -141,7 +152,7 @@ function Sidebar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) 
   );
 }
 
-/* ========= Overview (edit/save with draft) ========= */
+/* ========= Overview ========= */
 function OverviewPanel({
   readOnly, members, setMembers, overview, setOverview,
 }: {
@@ -250,10 +261,8 @@ function ChatPanel({ messages, onSend, readOnly }: { messages: Message[]; onSend
   );
 }
 
-/* ========= Tasks (NO hooks inside map; TaskCard child instead) ========= */
-function TaskCard({
-  task, onChange, onDelete, onMove, readOnly,
-}: {
+/* ========= Tasks (wired to REST API) ========= */
+function TaskCard({ task, onChange, onDelete, onMove, readOnly }: {
   task: Task;
   onChange: (patch: Partial<Task>) => void;
   onDelete: () => void;
@@ -263,7 +272,6 @@ function TaskCard({
   const [edit, setEdit] = useState(false);
   const [titleDraft, setTitleDraft] = useState(task.title);
   const [dueDraft, setDueDraft] = useState(task.due ?? "");
-
   return (
     <div className="border rounded-lg p-3 bg-gray-50">
       {!edit ? (
@@ -278,7 +286,7 @@ function TaskCard({
               onChange={(e) => onChange({ status: e.target.value as Task["status"] })}
             >
               <option value="todo">To do</option>
-              <option value="doing">In progress</option>
+              <option value="in_progress">In progress</option>
               <option value="done">Done</option>
             </select>
             <button className="px-2 py-1 rounded border" disabled={readOnly} onClick={() => onMove("left")}>←</button>
@@ -301,30 +309,78 @@ function TaskCard({
   );
 }
 
-function TasksPanel({ tasks, setTasks, readOnly }: { tasks: Task[]; setTasks: (t: Task[]) => void; readOnly?: boolean }) {
+function TasksPanel({ workspaceId, tasks, setTasks, readOnly }: {
+  workspaceId: string;
+  tasks: Task[];
+  setTasks: (t: Task[]) => void;
+  readOnly?: boolean;
+}) {
   const [newTitle, setNewTitle] = useState("");
   const [newDue, setNewDue] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  const addTask = () => {
+  useEffect(() => {
+    (async () => {
+      setErr(null);
+      setLoading(true);
+      try {
+        await ensureSession();
+        const data = await apiListTasks(workspaceId);
+        setTasks(data);
+      } catch (e: any) {
+        setErr(e?.message || String(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [workspaceId, setTasks]);
+
+  const addTask = async () => {
     if (!newTitle.trim()) return;
-    setTasks([{ id: crypto.randomUUID(), title: newTitle.trim(), due: newDue || undefined, status: "todo" }, ...tasks]);
-    setNewTitle(""); setNewDue("");
+    try {
+      const created = await apiCreateTask(workspaceId, {
+        title: newTitle.trim(),
+        status: "todo",
+        due: newDue || undefined,
+      });
+      setTasks([created, ...tasks]);
+      setNewTitle("");
+      setNewDue("");
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    }
   };
 
-  const updateTask = (id: string, patch: Partial<Task>) => setTasks(tasks.map((t) => (t.id === id ? { ...t, ...patch } : t)));
-  const delTask = (id: string) => setTasks(tasks.filter((t) => t.id !== id));
+  const updateTask = async (id: string, patch: Partial<Task>) => {
+    try {
+      const updated = await apiUpdateTask(id, patch);
+      setTasks(tasks.map((t) => (t.id === id ? updated : t)));
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    }
+  };
+
+  const delTask = async (id: string) => {
+    try {
+      await apiDeleteTask(id);
+      setTasks(tasks.filter((t) => t.id !== id));
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    }
+  };
+
   const move = (id: string, dir: "left" | "right") => {
-    const order: Task["status"][] = ["todo", "doing", "done"];
-    setTasks(tasks.map((t) => {
-      if (t.id !== id) return t;
-      const idx = order.indexOf(t.status) + (dir === "right" ? 1 : -1);
-      return { ...t, status: order[Math.max(0, Math.min(order.length - 1, idx))] };
-    }));
+    const order: Task["status"][] = ["todo", "in_progress", "done"];
+    const t = tasks.find((x) => x.id === id);
+    if (!t) return;
+    const idx = Math.max(0, Math.min(order.length - 1, order.indexOf(t.status) + (dir === "right" ? 1 : -1)));
+    updateTask(id, { status: order[idx] });
   };
 
   const groups = useMemo(() => ({
     todo: tasks.filter((t) => t.status === "todo"),
-    doing: tasks.filter((t) => t.status === "doing"),
+    in_progress: tasks.filter((t) => t.status === "in_progress"),
     done: tasks.filter((t) => t.status === "done"),
   }), [tasks]);
 
@@ -336,12 +392,19 @@ function TasksPanel({ tasks, setTasks, readOnly }: { tasks: Task[]; setTasks: (t
         <BtnPrimary onClick={addTask} disabled={readOnly}>Add</BtnPrimary>
       </div>
 
+      {err ? <p className="text-sm text-red-600">{err}</p> : null}
+      {loading ? <p className="text-sm">Loading tasks…</p> : null}
+
       <div className="grid md:grid-cols-3 gap-4">
-        {(["todo","doing","done"] as const).map((col) => (
-          <div key={col} className="bg-white border rounded-xl p-3 min-h-[280px] shadow-soft">
-            <h4 className="font-medium mb-3">{col === "todo" ? "To do" : col === "doing" ? "In progress" : "Done"}</h4>
+        {([
+          { key: "todo", label: "To do" },
+          { key: "in_progress", label: "In progress" },
+          { key: "done", label: "Done" },
+        ] as const).map((col) => (
+          <div key={col.key} className="bg-white border rounded-xl p-3 min-h-[280px] shadow-soft">
+            <h4 className="font-medium mb-3">{col.label}</h4>
             <div className="grid gap-2">
-              {groups[col].map((t) => (
+              {groups[col.key as keyof typeof groups].map((t) => (
                 <TaskCard
                   key={t.id}
                   task={t}
@@ -359,162 +422,196 @@ function TasksPanel({ tasks, setTasks, readOnly }: { tasks: Task[]; setTasks: (t
   );
 }
 
-/* ========= Notes (with Undo) ========= */
-function NotesPanel({ readOnly }: { readOnly?: boolean }) {
-  const [history, setHistory] = useState<string[]>(["## Team Notes\n\n- Describe your plan here."]);
-  const [idx, setIdx] = useState(0);
-  const value = history[idx];
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value);
+/* ========= Notes (server-backed with ETag & conflict) ========= */
+function NotesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?: boolean }) {
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  const save = () => {
-    const next = history.slice(0, idx + 1);
-    next.push(draft);
-    setHistory(next);
-    setIdx(next.length - 1);
-    setEditing(false);
-  };
-  const undo = () => {
-    if (idx > 0) setIdx(idx - 1);
-  };
+  const [etag, setEtag] = useState<string>("");
+  const [doc, setDoc] = useState<NotesDoc | null>(null);
+  const [draft, setDraft] = useState<string>("");
+
+  const [conflict, setConflict] = useState<null | {
+    etag: string; server: NotesDoc; expected: number; currentVersion: number;
+  }>(null);
+
+  const dirty = !!doc && draft !== doc.content;
+
+  async function load() {
+    setErr(null); setLoading(true);
+    try {
+      const { etag, doc } = await getNotes(workspaceId);
+      setEtag(etag); setDoc(doc); setDraft(doc.content);
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [workspaceId]);
+
+  async function onSave() {
+    if (!doc) return;
+    setErr(null);
+    const res: SaveNotesResult = await saveNotes(workspaceId, draft, etag);
+    if (res.ok) {
+      setDoc(res.doc); setDraft(res.doc.content); setEtag(res.etag); setConflict(null);
+    } else if (res.type === "conflict") {
+      setConflict({ etag: res.etag, server: res.server, expected: res.expected, currentVersion: res.currentVersion });
+    }
+  }
+
+  function useServer() {
+    if (!conflict) return;
+    setDoc(conflict.server); setDraft(conflict.server.content); setEtag(conflict.etag); setConflict(null);
+  }
+  async function overwriteAnyway() {
+    if (!conflict) return;
+    const res = await saveNotes(workspaceId, draft, conflict.etag);
+    if (res.ok) {
+      setDoc(res.doc); setDraft(res.doc.content); setEtag(res.etag); setConflict(null);
+    } else if (res.type === "conflict") {
+      setConflict({ etag: res.etag, server: res.server, expected: res.expected, currentVersion: res.currentVersion });
+    }
+  }
+
+  if (loading) return <div className="p-4">Loading notes…</div>;
+  if (err) return <div className="p-4 text-red-600">Error: {err}</div>;
+  if (!doc) return <div className="p-4">No notes.</div>;
 
   return (
     <div className="h-full grid grid-rows-[auto,1fr]">
-      <div className="border-b px-4 py-2 flex items-center gap-2 bg-white">
-        <span className="text-sm text-gray-600">{editing ? "Editing" : "Preview"}</span>
+      <div className="border-b px-4 py-2 flex items-center gap-3 bg-white">
+        <span className="text-sm text-gray-600">
+          Version <code>v{doc.version}</code> • Updated {new Date(doc.updatedAt).toLocaleString()}
+        </span>
+        {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
         <div className="ml-auto flex gap-2">
-          <BtnSecondary onClick={undo} disabled={idx === 0}>Undo</BtnSecondary>
-          {!editing ? (
-            <BtnSecondary onClick={() => { setDraft(value); setEditing(true); }} disabled={readOnly}>Edit</BtnSecondary>
-          ) : (
-            <>
-              <BtnSecondary onClick={() => setEditing(false)}>Cancel</BtnSecondary>
-              <BtnPrimary onClick={save}>Save</BtnPrimary>
-            </>
-          )}
+          <BtnSecondary onClick={() => setDraft(doc.content)} disabled={!dirty || readOnly}>Revert</BtnSecondary>
+          <BtnPrimary onClick={onSave} disabled={!dirty || readOnly}>Save</BtnPrimary>
         </div>
       </div>
-      {!editing ? (
-        <div className="p-4 whitespace-pre-wrap leading-relaxed">{value}</div>
-      ) : (
-        <textarea className="w-full h-full p-4 outline-none" value={draft} onChange={(e) => setDraft(e.target.value)} />
+
+      {conflict && (
+        <div className="border-b bg-amber-50 text-amber-900 px-4 py-3 text-sm flex items-start gap-3">
+          <div className="flex-1">
+            <strong>Version conflict.</strong> Server is at <code>v{conflict.currentVersion}</code>, your edit was based on <code>v{conflict.expected}</code>.
+          </div>
+          <div className="flex gap-2">
+            <button className="btn border" onClick={useServer}>Use Server</button>
+            <button className="btn-primary" onClick={overwriteAnyway}>Overwrite</button>
+          </div>
+        </div>
       )}
+
+      <div className="min-h-0">
+        <textarea className="w-full h-full p-4 outline-none" value={draft} onChange={(e) => setDraft(e.target.value)} readOnly={readOnly}/>
+      </div>
     </div>
   );
 }
 
-/* ========= Files (unchanged editor modal; already supports open/edit/save/delete) ========= */
-type Uploaded = {
-  id: string;
-  name: string;
-  size: number;
-  type: string;
-  isText: boolean;
-  text?: string;        // for text-like files
-  dataUrl?: string;     // for images/pdf/audio/video/unknown
-};
-
-function blobFromUpload(u: Uploaded): Blob {
-  if (u.isText) {
-    const mime = u.type || "text/plain;charset=utf-8";
-    return new Blob([u.text ?? ""], { type: mime });
-  }
-  // dataUrl → Blob
-  const arr = u.dataUrl?.split(",") ?? [];
-  if (arr.length < 2) return new Blob([], { type: u.type });
-  const bstr = atob(arr[1]);
-  const u8 = new Uint8Array(bstr.length);
-  for (let i = 0; i < bstr.length; i++) u8[i] = bstr.charCodeAt(i);
-  return new Blob([u8], { type: u.type || "application/octet-stream" });
+/* ========= Files (server-backed: list/upload/download/delete) ========= */
+function isTextLike(name: string, mime: string) {
+  return (
+    mime.startsWith("text/") ||
+    ["application/json", "application/xml", "application/javascript"].includes(mime) ||
+    /\.(md|txt|json|xml|csv|log|ts|tsx|js|jsx|css|html)$/i.test(name)
+  );
 }
 
-function downloadUploaded(u: Uploaded) {
-  const blob = blobFromUpload(u);
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = u.name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
+function FilesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?: boolean }) {
+  const [files, setFiles] = useState<ServerFile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-function FilesPanel({ readOnly }: { readOnly?: boolean }) {
-  const [files, setFiles] = useState<Uploaded[]>([]);
-  const [active, setActive] = useState<Uploaded | null>(null);
-  const [draftName, setDraftName] = useState(""); 
-  const [draftText, setDraftText] = useState("");
+  const [active, setActive] = useState<ServerFile | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string>("");
+  const [previewText, setPreviewText] = useState<string>("");
 
-  const onUpload = (fl: FileList | null) => {
-    if (!fl || readOnly) return;
-    Array.from(fl).forEach((f) => {
-      // decide reading mode
-      const isTextLike =
-        f.type.startsWith("text/") ||
-        ["application/json", "application/xml", "application/javascript"].includes(f.type) ||
-        /\.(md|txt|json|xml|csv|log|ts|tsx|js|jsx|css|html)$/i.test(f.name);
-
-      const reader = new FileReader();
-      reader.onload = () => {
-        setFiles((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            name: f.name,
-            size: f.size,
-            type: f.type || (isTextLike ? "text/plain" : "application/octet-stream"),
-            isText: isTextLike,
-            text: isTextLike ? (reader.result as string) : undefined,
-            dataUrl: !isTextLike ? (reader.result as string) : undefined,
-          },
-        ]);
-      };
-      if (isTextLike) reader.readAsText(f);
-      else reader.readAsDataURL(f);
-    });
-  };
-
-  const openFile = (f: Uploaded) => {
-    setActive(f);
-    setDraftName(f.name);
-    setDraftText(f.text ?? "");
-  };
-  const saveFile = () => {
-    if (!active) return;
-    setFiles((prev) =>
-      prev.map((x) =>
-        x.id === active.id ? { ...x, name: draftName, text: active.isText ? draftText : x.text } : x
-      )
-    );
-    setActive(null);
-  };
-  const deleteFile = (id: string) => setFiles((prev) => prev.filter((x) => x.id !== id));
-
-  // Simple preview renderer by MIME
-  const renderPreview = (f: Uploaded) => {
-    if (f.isText) {
-      return (
-        <textarea
-          className="w-full h-64 p-3 border rounded-lg outline-none"
-          value={draftText}
-          onChange={(e) => setDraftText(e.target.value)}
-        />
-      );
+  async function refresh() {
+    setErr(null); setLoading(true);
+    try {
+      await ensureSession();
+      const data = await apiListFiles(workspaceId);
+      setFiles(data);
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setLoading(false);
     }
-    if (!f.dataUrl) return <div className="text-sm text-gray-600">No preview available.</div>;
+  }
 
-    if (f.type.startsWith("image/")) return <img src={f.dataUrl} alt={f.name} className="max-h-96 object-contain rounded" />;
-    if (f.type === "application/pdf")
-      return <iframe title={f.name} src={f.dataUrl} className="w-full h-96 rounded border" />;
-    if (f.type.startsWith("audio/")) return <audio controls src={f.dataUrl} className="w-full" />;
-    if (f.type.startsWith("video/")) return <video controls src={f.dataUrl} className="w-full max-h-96 rounded" />;
-    return (
-      <div className="text-sm text-gray-600">
-        Preview not supported. You can download the file to view locally.
-      </div>
-    );
-  };
+  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [workspaceId]);
+
+  async function uploadOne(file: File) {
+    const init: InitUploadResponse = await apiInitUpload(workspaceId, {
+      name: file.name,
+      mime: file.type || (isTextLike(file.name, file.type) ? "text/plain" : "application/octet-stream"),
+      size: file.size,
+    });
+
+    const { upload } = init;
+    // IMPORTANT: Don't set headers manually; let the browser set multipart/form-data boundary
+    if (upload.method === "POST" && "fields" in upload) {
+      const form = new FormData();
+      Object.entries(upload.fields).forEach(([k, v]) => form.append(k, v as string));
+      form.append("file", file, file.name);
+      const res = await fetch(upload.url, { method: "POST", body: form });
+      if (!res.ok) throw new Error(`S3 POST failed: ${res.status} ${res.statusText}`);
+    } else if (upload.method === "PUT") {
+      const res = await fetch((upload as any).url, {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+      });
+      if (!res.ok) throw new Error(`S3 PUT failed: ${res.status} ${res.statusText}`);
+    } else {
+      throw new Error(`Unknown upload method: ${(upload as any).method}`);
+    }
+  }
+
+  async function onUpload(fl: FileList | null) {
+    if (!fl || readOnly) return;
+    setErr(null);
+    try {
+      // upload sequentially (simpler error surfacing)
+      for (const f of Array.from(fl)) {
+        await uploadOne(f);
+      }
+      await refresh();
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    }
+  }
+
+  async function openPreview(f: ServerFile) {
+    try {
+      const url = await getDownloadUrl(f.id);
+      setPreviewUrl(url);
+      setActive(f);
+      if (isTextLike(f.name, f.mime)) {
+        const r = await fetch(url, { credentials: "include" });
+        const t = await r.text();
+        setPreviewText(t);
+      } else {
+        setPreviewText("");
+      }
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    }
+  }
+
+  async function remove(fileId: string) {
+    if (!confirm("Delete this file? This cannot be undone.")) return;
+    try {
+      await apiDeleteFile(fileId);
+      setFiles((xs) => xs.filter((x) => x.id !== fileId));
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    }
+  }
 
   return (
     <div className="h-full p-4">
@@ -523,15 +620,34 @@ function FilesPanel({ readOnly }: { readOnly?: boolean }) {
         Drag & drop or click to upload {readOnly && "(disabled in demo)"}
       </label>
 
+      {err ? <p className="text-sm text-red-600 mt-3">{err}</p> : null}
+      {loading ? <p className="text-sm mt-3">Loading files…</p> : null}
+
       <ul className="mt-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {files.map((f) => (
           <li key={f.id} className="border rounded-xl p-3 bg-white">
             <div className="font-medium text-sm truncate" title={f.name}>{f.name}</div>
-            <div className="text-xs text-gray-500">{(f.size / 1024).toFixed(1)} KB • {f.type || "file"}</div>
+            <div className="text-xs text-gray-500">
+              {(f.size / 1024).toFixed(1)} KB • {f.mime || "file"} • {new Date(f.createdAt).toLocaleString()}
+            </div>
             <div className="mt-2 flex gap-2">
-              <button className="btn-secondary h-8" onClick={() => openFile(f)} disabled={readOnly}>Open</button>
-              <button className="btn h-8 border" onClick={() => downloadUploaded(f)}>Download</button>
-              <button className="btn h-8 border" onClick={() => deleteFile(f.id)} disabled={readOnly}>Delete</button>
+              <button className="btn-secondary h-8" onClick={() => openPreview(f)} disabled={readOnly}>Open</button>
+              <a
+                className="btn h-8 border"
+                href={previewUrl && active?.id === f.id ? previewUrl : undefined}
+                onClick={async (e) => {
+                  if (!previewUrl || active?.id !== f.id) {
+                    e.preventDefault();
+                    const url = await getDownloadUrl(f.id);
+                    window.open(url, "_blank");
+                  }
+                }}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Download
+              </a>
+              <button className="btn h-8 border" onClick={() => remove(f.id)} disabled={readOnly}>Delete</button>
             </div>
           </li>
         ))}
@@ -539,31 +655,33 @@ function FilesPanel({ readOnly }: { readOnly?: boolean }) {
 
       <Modal
         isOpen={!!active}
-        onClose={() => setActive(null)}
+        onClose={() => { setActive(null); setPreviewUrl(""); setPreviewText(""); }}
         title={active ? `Preview: ${active.name}` : "Preview"}
         footer={
-          <div className="flex justify-between items-center">
-            {active && (
-              <button className="btn border" onClick={() => downloadUploaded(active)}>
-                Download
-              </button>
-            )}
-            <div className="ml-auto flex gap-2">
-              <button className="btn-secondary" onClick={() => setActive(null)}>Close</button>
-              {active?.isText && (
-                <button className="btn-primary" onClick={saveFile} disabled={readOnly}>Save</button>
-              )}
-            </div>
+          <div className="flex justify-end gap-2">
+            <button className="btn-secondary" onClick={() => { setActive(null); setPreviewUrl(""); setPreviewText(""); }}>Close</button>
           </div>
         }
       >
         {active && (
           <div className="grid gap-3">
             <div className="grid sm:grid-cols-[1fr,auto] gap-2 items-center">
-              <input className="input" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
-              <span className="text-xs text-gray-500">{active.type || "file"}</span>
+              <input className="input" value={active.name} readOnly />
+              <span className="text-xs text-gray-500">{active.mime || "file"}</span>
             </div>
-            {renderPreview(active)}
+            {isTextLike(active.name, active.mime) ? (
+              <textarea className="w-full h-64 p-3 border rounded-lg outline-none" value={previewText} readOnly />
+            ) : active.mime.startsWith("image/") ? (
+              <img src={previewUrl} alt={active.name} className="max-h-96 object-contain rounded" />
+            ) : active.mime === "application/pdf" ? (
+              <iframe title={active.name} src={previewUrl} className="w-full h-96 rounded border" />
+            ) : active.mime.startsWith("audio/") ? (
+              <audio controls src={previewUrl} className="w-full" />
+            ) : active.mime.startsWith("video/") ? (
+              <video controls src={previewUrl} className="w-full max-h-96 rounded" />
+            ) : (
+              <div className="text-sm text-gray-600">No inline preview. Use Download to open the file.</div>
+            )}
           </div>
         )}
       </Modal>
@@ -571,8 +689,7 @@ function FilesPanel({ readOnly }: { readOnly?: boolean }) {
   );
 }
 
-
-/* ========= Tree view ========= */
+/* ========= Tree view / Code panel ========= */
 function TreeView({ node, selectedPath, onSelect, onToggle }: {
   node: TreeNode; selectedPath: string | null; onSelect: (n: TreeNode) => void; onToggle: (folderId: string) => void;
 }) {
@@ -604,7 +721,6 @@ function TreeView({ node, selectedPath, onSelect, onToggle }: {
   );
 }
 
-/* ========= Code (delete by ID; rest as before) ========= */
 function CodePanel({ readOnly }: { readOnly: boolean }) {
   const [root, setRoot] = useState<FolderNode>(() => {
     const r = makeFolder("");
@@ -662,11 +778,9 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
     });
   };
 
-  const mutateFile = (path: string, patch: Partial<FileNode>) => setRootMapped((n) => (n.kind === "file" && n.path === path ? { ...n, ...patch } : n));
-
   const renameSelected = () => {
     if (!selectedNode || readOnly) return;
-    const newName = prompt("New name:", selectedNode.name); if (!newName) return;
+    const newName = prompt("New name:", (selectedNode as any).name); if (!newName) return;
     const parent = selectedFolderPath;
     if (selectedNode.kind === "file") {
       const newPath = [parent, newName].filter(Boolean).join("/");
@@ -690,17 +804,10 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
   };
   const deleteSelected = () => {
     if (!selectedNode || readOnly) return;
-    if (!confirm(`Delete ${selectedNode.kind} "${selectedNode.name}"? This cannot be undone.`)) return;
-    const next = removeNodeById(root, selectedNode.id);
+    if (!confirm(`Delete ${selectedNode.kind} "${(selectedNode as any).name}"? This cannot be undone.`)) return;
+    const next = removeNodeById(root, (selectedNode as any).id);
     setRoot(next); setSelectedPath("");
   };
-
-  const save = () => {
-    if (readOnly || !selectedNode || selectedNode.kind !== "file") return;
-    console.log("SAVE", selectedNode.path, (selectedNode as FileNode).value);
-    alert("Saved locally (stub). Wire to your API for persistence.");
-  };
-  const languageOptions: FileLanguage[] = ["typescript","javascript","python","java","c","cpp","csharp","go","rust","json","markdown","html","css","yaml","xml","shell"];
 
   return (
     <div className="h-full grid grid-cols-[18rem,1fr]">
@@ -742,22 +849,10 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
 
       <section className="grid grid-rows-[auto,auto,1fr] min-h-0">
         <div className="border-b bg-white px-3 py-2 flex items-center gap-2">
-          <span className="text-sm text-gray-500 truncate">{selectedNode ? selectedNode.path : "Select a file/folder"}</span>
+          <span className="text-sm text-gray-500 truncate">{selectedNode ? (selectedNode as any).path : "Select a file/folder"}</span>
           <div className="ml-auto flex items-center gap-2">
-            {selectedNode?.kind === "file" && (
-              <select
-                className="border rounded-md px-2 py-1 text-sm"
-                value={selectedNode.language}
-                onChange={(e) => setRootMapped((n) => (n.kind === "file" && n.id === selectedNode.id ? { ...n, language: e.target.value as FileLanguage } : n))}
-                disabled={readOnly}
-                title="Language"
-              >
-                {languageOptions.map((l) => <option key={l} value={l}>{l}</option>)}
-              </select>
-            )}
             <BtnSecondary className="h-8" onClick={renameSelected} disabled={!selectedNode || readOnly}>Rename</BtnSecondary>
             <Button className="h-8 border" onClick={deleteSelected} disabled={!selectedNode || readOnly}>Delete</Button>
-            <BtnPrimary className="h-8" onClick={save} disabled={readOnly || !selectedNode || selectedNode.kind !== "file"}>Save</BtnPrimary>
           </div>
         </div>
 
@@ -766,12 +861,12 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
             <span className="text-xs text-gray-500">Filename:</span>
             <input
               className="flex-1 px-2 py-1 border rounded-md text-sm"
-              value={selectedNode.name}
+              value={(selectedNode as any).name}
               onChange={(e) => {
                 const newName = e.target.value;
-                const parent = selectedFolderPath;
+                const parent = (selectedNode as any).path.split("/").slice(0, -1).join("/");
                 const newPath = [parent, newName].filter(Boolean).join("/");
-                setRootMapped((n) => (n.kind === "file" && n.id === selectedNode.id
+                setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id
                   ? { ...n, name: newName, path: newPath, language: detectLanguageByName(newName) }
                   : n));
                 setSelectedPath(newPath);
@@ -785,9 +880,9 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
           {selectedNode?.kind === "file" ? (
             <Editor
               height="100%"
-              language={selectedNode.language}
+              language={(selectedNode as any).language}
               value={(selectedNode as FileNode).value}
-              onChange={(v) => setRootMapped((n) => (n.kind === "file" && n.id === selectedNode.id ? { ...n, value: v ?? "" } : n))}
+              onChange={(v) => setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id ? { ...n, value: v ?? "" } : n))}
               options={{ readOnly, fontSize: 14, minimap: { enabled: false }, automaticLayout: true, padding: { top: 12 } }}
               theme="vs"
             />
@@ -804,10 +899,21 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
 
 /* ========= Page ========= */
 export default function CoveWorkspacePage() {
-  const { id } = useParams();
+  const { id: workspaceId } = useParams();
   const readOnly = false;
   const { messages, setMessages, tasks, setTasks, members, setMembers, overview, setOverview } = useWorkspaceData();
   const [tab, setTab] = useState<string>("Overview");
+
+  useEffect(() => {
+    if (!workspaceId || tab !== "Tasks") return;
+    (async () => {
+      try {
+        await ensureSession();
+        const data = await apiListTasks(workspaceId);
+        setTasks(data);
+      } catch { /* silent */ }
+    })();
+  }, [workspaceId, tab, setTasks]);
 
   const onSend = (text: string) =>
     setMessages((m) => [...m, { id: crypto.randomUUID(), author: "You", text, at: new Date().toTimeString().slice(0,5) }]);
@@ -820,9 +926,11 @@ export default function CoveWorkspacePage() {
           <OverviewPanel readOnly={readOnly} members={members} setMembers={setMembers} overview={overview} setOverview={setOverview} />
         )}
         {tab === "Chat" && <ChatPanel messages={messages} onSend={onSend} readOnly={readOnly} />}
-        {tab === "Tasks" && <TasksPanel tasks={tasks} setTasks={setTasks} readOnly={readOnly} />}
-        {tab === "Notes" && <NotesPanel readOnly={readOnly} />}
-        {tab === "Files" && <FilesPanel readOnly={readOnly} />}
+        {tab === "Tasks" && workspaceId && (
+          <TasksPanel workspaceId={workspaceId} tasks={tasks} setTasks={setTasks} readOnly={readOnly} />
+        )}
+        {tab === "Notes" && workspaceId && <NotesPanel workspaceId={workspaceId} readOnly={readOnly} />}
+        {tab === "Files" && workspaceId && <FilesPanel workspaceId={workspaceId} readOnly={readOnly} />}
         {tab === "Code" && <CodePanel readOnly={readOnly} />}
       </main>
     </div>
