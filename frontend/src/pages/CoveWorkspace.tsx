@@ -4,24 +4,19 @@ import { useParams, Link } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 import Modal from "../components/ui/modal";
 
+import { API_BASE } from "@/lib/api";
 import { ensureSession } from "@/lib/auth";
+
 import {
   listTasks as apiListTasks,
   createTask as apiCreateTask,
   updateTask as apiUpdateTask,
   deleteTask as apiDeleteTask,
-  Task, // { id, title, status: 'todo'|'in_progress'|'done', due? }
+  Task,
 } from "@/lib/tasks";
-import { getNotes, saveNotes, NotesDoc, SaveNotesResult } from "@/lib/notes";
-import {
-  listFiles as apiListFiles,
-  initUpload as apiInitUpload,
-  deleteFile as apiDeleteFile,
-  getDownloadUrl,
-  ServerFile,
-  InitUploadResponse,
-} from "@/lib/files";
 
+import { listFiles, requestUpload, uploadToS3, FileItem } from "@/lib/files";
+import { getNotes, saveNotes, NotesDoc, SaveNotesResult } from "@/lib/notes";
 
 /* ========= Buttons ========= */
 const Button = ({ className = "", type = "button", ...p }: any) => (
@@ -513,179 +508,67 @@ function NotesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?:
   );
 }
 
-/* ========= Files (server-backed: list/upload/download/delete) ========= */
-function isTextLike(name: string, mime: string) {
-  return (
-    mime.startsWith("text/") ||
-    ["application/json", "application/xml", "application/javascript"].includes(mime) ||
-    /\.(md|txt|json|xml|csv|log|ts|tsx|js|jsx|css|html)$/i.test(name)
-  );
-}
-
+/* ========= Files (server-backed: list/upload/download) ========= */
 function FilesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?: boolean }) {
-  const [files, setFiles] = useState<ServerFile[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [files, setFiles] = useState<FileItem[]>([]);
   const [err, setErr] = useState<string | null>(null);
-
-  const [active, setActive] = useState<ServerFile | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string>("");
-  const [previewText, setPreviewText] = useState<string>("");
+  const [busy, setBusy] = useState(false);
 
   async function refresh() {
-    setErr(null); setLoading(true);
+    setErr(null);
     try {
-      await ensureSession();
-      const data = await apiListFiles(workspaceId);
-      setFiles(data);
+      const items = await listFiles(workspaceId);
+      setFiles(items);
     } catch (e: any) {
       setErr(e?.message || String(e));
-    } finally {
-      setLoading(false);
     }
   }
 
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [workspaceId]);
 
-  async function uploadOne(file: File) {
-    const init: InitUploadResponse = await apiInitUpload(workspaceId, {
-      name: file.name,
-      mime: file.type || (isTextLike(file.name, file.type) ? "text/plain" : "application/octet-stream"),
-      size: file.size,
-    });
-
-    const { upload } = init;
-    // IMPORTANT: Don't set headers manually; let the browser set multipart/form-data boundary
-    if (upload.method === "POST" && "fields" in upload) {
-      const form = new FormData();
-      Object.entries(upload.fields).forEach(([k, v]) => form.append(k, v as string));
-      form.append("file", file, file.name);
-      const res = await fetch(upload.url, { method: "POST", body: form });
-      if (!res.ok) throw new Error(`S3 POST failed: ${res.status} ${res.statusText}`);
-    } else if (upload.method === "PUT") {
-      const res = await fetch((upload as any).url, {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type || "application/octet-stream" },
-      });
-      if (!res.ok) throw new Error(`S3 PUT failed: ${res.status} ${res.statusText}`);
-    } else {
-      throw new Error(`Unknown upload method: ${(upload as any).method}`);
-    }
-  }
-
-  async function onUpload(fl: FileList | null) {
+  async function onPick(fl: FileList | null) {
     if (!fl || readOnly) return;
+    setBusy(true);
     setErr(null);
     try {
-      // upload sequentially (simpler error surfacing)
-      for (const f of Array.from(fl)) {
-        await uploadOne(f);
+      for (const file of Array.from(fl)) {
+        const { upload } = await requestUpload(workspaceId, file);
+        await uploadToS3(upload, file);
       }
       await refresh();
     } catch (e: any) {
       setErr(e?.message || String(e));
-    }
-  }
-
-  async function openPreview(f: ServerFile) {
-    try {
-      const url = await getDownloadUrl(f.id);
-      setPreviewUrl(url);
-      setActive(f);
-      if (isTextLike(f.name, f.mime)) {
-        const r = await fetch(url, { credentials: "include" });
-        const t = await r.text();
-        setPreviewText(t);
-      } else {
-        setPreviewText("");
-      }
-    } catch (e: any) {
-      setErr(e?.message || String(e));
-    }
-  }
-
-  async function remove(fileId: string) {
-    if (!confirm("Delete this file? This cannot be undone.")) return;
-    try {
-      await apiDeleteFile(fileId);
-      setFiles((xs) => xs.filter((x) => x.id !== fileId));
-    } catch (e: any) {
-      setErr(e?.message || String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
     <div className="h-full p-4">
       <label className={`block border-2 border-dashed rounded-xl p-6 text-center ${readOnly ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:bg-gray-50"}`}>
-        <input type="file" multiple className="hidden" disabled={readOnly} onChange={(e) => onUpload(e.target.files)} />
-        Drag & drop or click to upload {readOnly && "(disabled in demo)"}
+        <input type="file" multiple className="hidden" disabled={readOnly} onChange={(e) => onPick(e.target.files)} />
+        {busy ? "Uploading…" : "Drag & drop or click to upload"}
       </label>
 
-      {err ? <p className="text-sm text-red-600 mt-3">{err}</p> : null}
-      {loading ? <p className="text-sm mt-3">Loading files…</p> : null}
+      {err && <p className="mt-3 text-sm text-red-600">{err}</p>}
 
       <ul className="mt-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {files.map((f) => (
           <li key={f.id} className="border rounded-xl p-3 bg-white">
             <div className="font-medium text-sm truncate" title={f.name}>{f.name}</div>
             <div className="text-xs text-gray-500">
-              {(f.size / 1024).toFixed(1)} KB • {f.mime || "file"} • {new Date(f.createdAt).toLocaleString()}
+              {(f.size / 1024).toFixed(1)} KB • {f.mime || "file"}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              Uploaded {new Date(f.createdAt).toLocaleString()}
+              {f.createdBy ? ` by ${f.createdBy.name || f.createdBy.email}` : ""}
             </div>
             <div className="mt-2 flex gap-2">
-              <button className="btn-secondary h-8" onClick={() => openPreview(f)} disabled={readOnly}>Open</button>
-              <a
-                className="btn h-8 border"
-                href={previewUrl && active?.id === f.id ? previewUrl : undefined}
-                onClick={async (e) => {
-                  if (!previewUrl || active?.id !== f.id) {
-                    e.preventDefault();
-                    const url = await getDownloadUrl(f.id);
-                    window.open(url, "_blank");
-                  }
-                }}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Download
-              </a>
-              <button className="btn h-8 border" onClick={() => remove(f.id)} disabled={readOnly}>Delete</button>
+              <a className="btn h-8 border" href={`${API_BASE}/files/${f.id}`} target="_blank" rel="noreferrer">Download</a>
             </div>
           </li>
         ))}
       </ul>
-
-      <Modal
-        isOpen={!!active}
-        onClose={() => { setActive(null); setPreviewUrl(""); setPreviewText(""); }}
-        title={active ? `Preview: ${active.name}` : "Preview"}
-        footer={
-          <div className="flex justify-end gap-2">
-            <button className="btn-secondary" onClick={() => { setActive(null); setPreviewUrl(""); setPreviewText(""); }}>Close</button>
-          </div>
-        }
-      >
-        {active && (
-          <div className="grid gap-3">
-            <div className="grid sm:grid-cols-[1fr,auto] gap-2 items-center">
-              <input className="input" value={active.name} readOnly />
-              <span className="text-xs text-gray-500">{active.mime || "file"}</span>
-            </div>
-            {isTextLike(active.name, active.mime) ? (
-              <textarea className="w-full h-64 p-3 border rounded-lg outline-none" value={previewText} readOnly />
-            ) : active.mime.startsWith("image/") ? (
-              <img src={previewUrl} alt={active.name} className="max-h-96 object-contain rounded" />
-            ) : active.mime === "application/pdf" ? (
-              <iframe title={active.name} src={previewUrl} className="w-full h-96 rounded border" />
-            ) : active.mime.startsWith("audio/") ? (
-              <audio controls src={previewUrl} className="w-full" />
-            ) : active.mime.startsWith("video/") ? (
-              <video controls src={previewUrl} className="w-full max-h-96 rounded" />
-            ) : (
-              <div className="text-sm text-gray-600">No inline preview. Use Download to open the file.</div>
-            )}
-          </div>
-        )}
-      </Modal>
     </div>
   );
 }
@@ -785,18 +668,18 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
     const parent = selectedFolderPath;
     if (selectedNode.kind === "file") {
       const newPath = [parent, newName].filter(Boolean).join("/");
-      setRootMapped((n) => (n.kind === "file" && n.id === selectedNode.id ? { ...n, name: newName, path: newPath, language: detectLanguageByName(newName) } : n));
+      setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id ? { ...n, name: newName, path: newPath, language: detectLanguageByName(newName) } : n));
       setSelectedPath(newPath);
     } else {
       const oldPrefix = selectedNode.path;
       const newFolderPath = [parent.split("/").slice(0, -1).join("/"), newName].filter(Boolean).join("/");
       setRootMapped((n) => {
-        if (n.kind === "folder" && n.id === selectedNode.id) {
+        if (n.kind === "folder" && n.id === (selectedNode as any).id) {
           const transform = (cc: TreeNode): TreeNode => {
-            if (cc.kind === "folder") return { ...cc, path: cc.path.replace(oldPrefix, newFolderPath), children: cc.children.map(transform) };
-            return { ...cc, path: cc.path.replace(oldPrefix, newFolderPath) };
+            if (cc.kind === "folder") return { ...cc, path: (cc as FolderNode).path.replace(oldPrefix, newFolderPath), children: (cc as FolderNode).children.map(transform) };
+            return { ...(cc as FileNode), path: (cc as FileNode).path.replace(oldPrefix, newFolderPath) };
           };
-          return { ...n, name: newName, path: newFolderPath, children: n.children.map(transform) };
+          return { ...(n as FolderNode), name: newName, path: newFolderPath, children: (n as FolderNode).children.map(transform) };
         }
         return n;
       });
@@ -819,7 +702,7 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
             <select className="border rounded-md px-2 py-1 text-sm flex-1" value={selectedFolderPath} onChange={(e) => setSelectedPath(e.target.value)}>
               {(() => {
                 const folders: FolderNode[] = [];
-                const walk = (n: TreeNode) => { if (n.kind === "folder") { folders.push(n); n.children.forEach(walk); } };
+                const walk = (n: TreeNode) => { if (n.kind === "folder") { folders.push(n as FolderNode); (n as FolderNode).children.forEach(walk); } };
                 walk(root);
                 return folders.sort((a,b) => (a.path || "/").localeCompare(b.path || "/"))
                   .map((f) => <option key={f.id} value={f.path}>{f.path || "/"}</option>);
@@ -837,7 +720,7 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
             <label className={`btn-secondary h-8 px-3 ${readOnly ? "opacity-60 cursor-not-allowed" : ""}`} title="Upload folder">
               Upload folder
               <input type="file" multiple className="hidden" disabled={readOnly}
-                // @ts-expect-error: Chromium
+                // @ts-expect-error: Chromium only
                 webkitdirectory="" directory=""
                 onChange={(e) => handleUpload(e.target.files, selectedFolderPath)} />
             </label>
@@ -868,7 +751,7 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
                 const parent = (selectedNode as any).path.split("/").slice(0, -1).join("/");
                 const newPath = [parent, newName].filter(Boolean).join("/");
                 setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id
-                  ? { ...n, name: newName, path: newPath, language: detectLanguageByName(newName) }
+                  ? { ...(n as FileNode), name: newName, path: newPath, language: detectLanguageByName(newName) }
                   : n));
                 setSelectedPath(newPath);
               }}
@@ -883,7 +766,7 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
               height="100%"
               language={(selectedNode as any).language}
               value={(selectedNode as FileNode).value}
-              onChange={(v) => setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id ? { ...n, value: v ?? "" } : n))}
+              onChange={(v) => setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id ? { ...(n as FileNode), value: v ?? "" } : n))}
               options={{ readOnly, fontSize: 14, minimap: { enabled: false }, automaticLayout: true, padding: { top: 12 } }}
               theme="vs"
             />

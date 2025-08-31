@@ -1,58 +1,71 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { z } from "zod";
-
-const SignInDto = z.object({
-  email: z.string().email(),
-  name: z.string().min(1).optional(),
-  code: z.string().min(1),
-});
-
-// Simple guard used in this file only (workspaces will verify inline)
-async function authRequired(req: FastifyRequest, reply: FastifyReply) {
-  try {
-    await req.jwtVerify();      // fastify-jwt reads the "token" cookie
-    (req as any).user = req.user;
-  } catch {
-    return reply.code(401).send({ message: "Invalid token" });
-  }
-}
+import type { FastifyInstance } from "fastify";
 
 export default async function authRoutes(app: FastifyInstance) {
-  app.post("/auth/signin", async (req, reply) => {
-    const body = SignInDto.parse(req.body);
+  // ... your existing passcode /me /signout etc.
 
-    if (!process.env.ACCESS_CODE || body.code !== process.env.ACCESS_CODE) {
-      return reply.code(401).send({ message: "Invalid access code" });
-    }
+  // GOOGLE callback
+  app.get("/auth/google/callback", async (req, reply) => {
+    const token = await app.googleOAuth2.getAccessTokenFromAuthorizationCodeFlow(req);
+    const access = token.token.access_token as string;
+
+    // get profile
+    const profileRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { Authorization: `Bearer ${access}` },
+    });
+    const profile = await profileRes.json();
+
+    const email = profile.email as string;
+    const name = (profile.name || profile.given_name || email) as string;
 
     const user = await app.prisma.user.upsert({
-      where: { email: body.email },
-      update: { name: body.name ?? undefined },
-      create: { email: body.email, name: body.name ?? body.email.split("@")[0] },
+      where: { email },
+      update: { name },
+      create: { email, name },
     });
 
-    const token = await reply.jwtSign(
-      { id: user.id, email: user.email },
-      { expiresIn: "7d" }
-    );
+    const jwt = await reply.jwtSign({ sub: user.id, email: user.email, name: user.name });
+    reply.setCookie("token", jwt, { path: "/", httpOnly: true, sameSite: "lax" });
 
-    reply.setCookie("token", token, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-      secure: false, // true in prod over HTTPS
-      maxAge: 60 * 60 * 24 * 7,
+    const FRONTEND = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+    return reply.redirect(`${FRONTEND}/dashboard`);
+  });
+
+  // GITHUB callback
+  app.get("/auth/github/callback", async (req, reply) => {
+    const token = await app.githubOAuth2.getAccessTokenFromAuthorizationCodeFlow(req);
+    const access = token.token.access_token as string;
+
+    const uRes = await fetch("https://api.github.com/user", {
+      headers: { Authorization: `Bearer ${access}`, "User-Agent": "covestack" },
+    });
+    const u = await uRes.json();
+
+    // email might be null on /user, fetch list as fallback
+    let email: string | null = u.email || null;
+    if (!email) {
+      const emailsRes = await fetch("https://api.github.com/user/emails", {
+        headers: { Authorization: `Bearer ${access}`, "User-Agent": "covestack" },
+      });
+      const emails = await emailsRes.json();
+      const primary = emails.find((e: any) => e.primary && e.verified) || emails[0];
+      email = primary?.email || null;
+    }
+    if (!email) {
+      return reply.status(400).send({ error: "No email returned from GitHub" });
+    }
+
+    const name: string = u.name || u.login || email;
+
+    const user = await app.prisma.user.upsert({
+      where: { email },
+      update: { name },
+      create: { email, name },
     });
 
-    return reply.send({ id: user.id, email: user.email, name: user.name });
-  });
+    const jwt = await reply.jwtSign({ sub: user.id, email: user.email, name: user.name });
+    reply.setCookie("token", jwt, { path: "/", httpOnly: true, sameSite: "lax" });
 
-  app.post("/auth/signout", async (_req, reply) => {
-    reply.clearCookie("token", { path: "/" });
-    return reply.send({ ok: true });
-  });
-
-  app.get("/me", { preHandler: authRequired }, async (req) => {
-    return (req as any).user; // { id, email, iat, exp }
+    const FRONTEND = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+    return reply.redirect(`${FRONTEND}/dashboard`);
   });
 }

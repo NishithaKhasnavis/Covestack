@@ -1,14 +1,12 @@
-// src/lib/files.ts
-import { api } from "@/lib/api";
+import { api } from "./api";
 
-export type ServerFile = {
+export type FileItem = {
   id: string;
-  workspaceId: string;
   name: string;
-  mime: string;
+  mime: string | null;
   size: number;
   createdAt: string;
-  createdById: string;
+  createdBy?: { name?: string | null; email: string };
 };
 
 type PresignedPost = {
@@ -17,41 +15,25 @@ type PresignedPost = {
   fields: Record<string, string>;
 };
 
-type PresignedPut = {
-  method: "PUT";
-  url: string;
-};
-
-export type InitUploadResponse = {
-  file: ServerFile;
-  upload: PresignedPost | PresignedPut;
-};
-
-export async function listFiles(workspaceId: string): Promise<ServerFile[]> {
-  return api(`/workspaces/${workspaceId}/files`);
+export async function listFiles(workspaceId: string) {
+  return api<FileItem[]>(`/workspaces/${workspaceId}/files`);
 }
 
-export async function initUpload(
-  workspaceId: string,
-  file: { name: string; mime: string; size: number }
-): Promise<InitUploadResponse> {
-  return api(`/workspaces/${workspaceId}/files`, {
+export async function requestUpload(workspaceId: string, file: File) {
+  return api<{ file: FileItem; upload: PresignedPost }>(`/workspaces/${workspaceId}/files`, {
     method: "POST",
-    body: JSON.stringify(file),
+    body: JSON.stringify({ name: file.name, mime: file.type, size: file.size }),
   });
 }
 
-export async function deleteFile(fileId: string): Promise<void> {
-  await api(`/files/${fileId}`, { method: "DELETE" });
-}
-
-/** Try a dedicated download endpoint first; fall back to file record fields */
-export async function getDownloadUrl(fileId: string): Promise<string> {
-  try {
-    const r = await api<{ url: string }>(`/files/${fileId}/download`);
-    return r.url;
-  } catch {
-    const r = await api<any>(`/files/${fileId}`);
-    return r.url || r.downloadUrl || r.signedUrl || r.publicUrl || "";
+export async function uploadToS3(p: PresignedPost, file: File) {
+  const fd = new FormData();
+  Object.entries(p.fields).forEach(([k, v]) => fd.append(k, v));
+  fd.append("Content-Type", file.type || "application/octet-stream");
+  fd.append("file", file);
+  const res = await fetch(p.url, { method: "POST", body: fd });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`S3 upload failed: ${t || res.statusText}`);
   }
 }

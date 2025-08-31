@@ -4,24 +4,29 @@ export type Workspace = {
   id: string;
   name: string;
   description?: string | null;
-  createdAt: string;
+  createdAt: string;          // ISO
+  deadline?: string | null;   // ISO or null
+  ownerId: string;
 };
 
 export async function listWorkspaces(): Promise<Workspace[]> {
-  return api<Workspace[]>("/workspaces", { method: "GET" });
+  return api<Workspace[]>("/workspaces");
 }
 
-export async function createWorkspace(p: { name: string; description?: string }) {
-  return api<Workspace>("/workspaces", { json: p });
-}
-
-export async function renameWorkspace(id: string, name: string) {
-  return api<Workspace>(`/workspaces/${id}`, {
-    method: "PATCH",
-    json: { name },
+export async function createWorkspace(p: { name: string; description?: string }): Promise<Workspace> {
+  return api<Workspace>("/workspaces", {
+    method: "POST",
+    body: JSON.stringify(p),
   });
 }
 
-export async function deleteWorkspace(id: string) {
-  return api<void>(`/workspaces/${id}`, { method: "DELETE" });
+export async function renameWorkspace(id: string, name: string): Promise<Workspace> {
+  return api<Workspace>(`/workspaces/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteWorkspace(id: string): Promise<void> {
+  await api(`/workspaces/${id}`, { method: "DELETE" });
 }

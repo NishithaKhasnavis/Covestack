@@ -1,48 +1,38 @@
-// tiny client-side auth (localStorage-based; exchanged for a cookie on the server)
-import { api, apiRaw } from "./api";
+// src/lib/auth.ts
+import { API_BASE } from "./api";
 
-export type User = { id: string; name: string; email: string; passcode?: string };
-
-const USER_KEY = "cove:user";
+export type User = { id: string; email: string; name?: string; avatarUrl?: string };
+const LS_USER = "covestack:user";
 
 export function getUser(): User | null {
-  const raw = localStorage.getItem(USER_KEY);
+  const raw = localStorage.getItem(LS_USER);
   return raw ? (JSON.parse(raw) as User) : null;
 }
-export function setUser(u: User) {
-  localStorage.setItem(USER_KEY, JSON.stringify(u));
-}
-export function signOutLocal() {
-  localStorage.removeItem(USER_KEY);
+function setUser(u: User | null) {
+  if (!u) localStorage.removeItem(LS_USER);
+  else localStorage.setItem(LS_USER, JSON.stringify(u));
 }
 
-export function signIn(name: string, email: string, passcode: string) {
-  // local profile stored on device (placeholder auth)
-  const u: User = { id: crypto.randomUUID(), name, email, passcode };
+export async function ensureSession(): Promise<User | null> {
+  const res = await fetch(`${API_BASE}/me`, { credentials: "include" });
+  if (!res.ok) { setUser(null); return null; }
+  const u = (await res.json()) as User;
   setUser(u);
   return u;
 }
 
-/**
- * Exchange local passcode for a server token cookie.
- * Server route expects { email, name?, code } and sets a cookie.
- */
-export async function ensureSession() {
-  const u = getUser();
-  if (!u?.email || !u?.passcode) throw new Error("No local user / passcode");
-
-  // This will set the cookie if not already set
-  await api("/auth/passcode", {
-    json: { email: u.email, name: u.name, code: u.passcode },
+export async function signInPasscode(name: string, email: string, passcode: string) {
+  const res = await fetch(`${API_BASE}/auth/passcode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ name, email, passcode }),
   });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+  await ensureSession();
 }
 
-/** Clear server cookie and local profile */
-export async function signOutEverywhere() {
-  try {
-    await apiRaw("/auth/signout", { method: "POST" }); // no body, 204
-  } catch {
-    // ignore network errors on signout
-  }
-  signOutLocal();
+export async function signOut() {
+  await fetch(`${API_BASE}/auth/signout`, { method: "POST", credentials: "include" });
+  setUser(null);
 }
