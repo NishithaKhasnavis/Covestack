@@ -1,3 +1,4 @@
+// backend/src/routes/notes.ts
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { Role } from "@prisma/client";
@@ -15,10 +16,8 @@ function etagFor(version: number) {
 
 // Parse If-Match header safely (accepts W/"v123", "v123", or "123")
 function getIfMatchVersion(req: FastifyRequest): number | undefined {
-  const raw = (req.headers["if-match"] ?? (req.headers as any)["If-Match"]) as
-    | string
-    | string[]
-    | undefined;
+  const raw = (req.headers["if-match"] ??
+    (req.headers as any)["If-Match"]) as string | string[] | undefined;
 
   const pick = (v: string) => {
     const m = v.match(/v?(\d+)/i);
@@ -38,11 +37,13 @@ export default async function notesRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const { id: workspaceId } = req.params as { id: string };
 
-      const note =
-        (await app.prisma.note.findUnique({ where: { workspaceId } })) ??
-        (await app.prisma.note.create({
+      // use findFirst (no need for workspaceId to be @unique)
+      let note = await app.prisma.note.findFirst({ where: { workspaceId } });
+      if (!note) {
+        note = await app.prisma.note.create({
           data: { workspaceId, content: "", version: 1 },
-        }));
+        });
+      }
 
       reply.header("ETag", etagFor(note.version));
       return note;
@@ -53,23 +54,25 @@ export default async function notesRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string }; Body: z.infer<typeof SaveNotesDto> }>(
     "/workspaces/:id/notes",
     { preHandler: requireWorkspaceRole(Role.EDITOR) },
-    async (req, reply) => {
-      const { id: workspaceId } = req.params;
-      const body = SaveNotesDto.parse(req.body);
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const { id: workspaceId } = req.params as { id: string };
+      const body = SaveNotesDto.parse((req as any).body ?? {});
 
-      // who is updating
-      await req.jwtVerify();
-      const user = req.user as { id: string };
+      // who is updating (populates req.user)
+      await (req as any).jwtVerify();
+      const user = (req as any).user as { id: string };
 
-      const current = await app.prisma.note.findUnique({ where: { workspaceId } });
+      // read current by workspace
+      const current = await app.prisma.note.findFirst({ where: { workspaceId } });
       if (!current) {
         const created = await app.prisma.note.create({
           data: {
             workspaceId,
             content: body.content,
             version: 1,
+            // if your schema has updatedById, keep this; otherwise remove the next line
             updatedById: user.id,
-          },
+          } as any,
         });
         reply.header("ETag", etagFor(created.version));
         return created;
@@ -94,13 +97,15 @@ export default async function notesRoutes(app: FastifyInstance) {
         };
       }
 
+      // update by primary key to avoid requiring a unique(workspaceId)
       const updated = await app.prisma.note.update({
-        where: { workspaceId },
+        where: { id: current.id },
         data: {
           content: body.content,
           version: current.version + 1,
+          // if your schema has updatedById, keep this; otherwise remove the next line
           updatedById: user.id,
-        },
+        } as any,
       });
 
       reply.header("ETag", etagFor(updated.version));

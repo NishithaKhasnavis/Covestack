@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import Editor from "@monaco-editor/react";
-import Modal from "../components/ui/modal";
+import Modal from "../components/ui/modal"; // ← fixed: default import
 
 import { API_BASE } from "@/lib/api";
 import { ensureSession } from "@/lib/auth";
@@ -46,6 +46,42 @@ const EXT_TO_LANG: Record<string, FileLanguage> = {
 };
 const detectLanguageByName = (name: string): FileLanguage =>
   EXT_TO_LANG[(name.split(".").pop() ?? "").toLowerCase()] ?? "typescript";
+
+/* ========= GitHub helpers ========= */
+type GHRepo = { id: number; name: string; full_name: string; owner: string; default_branch: string; private: boolean };
+type GHBranch = { name: string; protected: boolean };
+
+async function ghGet<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
+  if (!res.ok) throw new Error(await res.text().catch(() => `${res.status} ${res.statusText}`));
+  return res.json() as Promise<T>;
+}
+
+async function ghPost<T>(path: string, body: any): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text().catch(() => `${res.status} ${res.statusText}`));
+  return res.json() as Promise<T>;
+}
+
+const github = {
+  me: () => ghGet<{ login: string; name?: string; avatar_url?: string }>("/github/me"),
+  repos: () => ghGet<GHRepo[]>("/github/repos?per_page=100"),
+  branches: (owner: string, repo: string) =>
+    ghGet<GHBranch[]>(`/github/branches?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`),
+  saveToken: (token: string) => ghPost<{ ok: true }>("/integrations/github/token", { token }),
+};
+
+function fmtDate(d?: string | null) {
+  if (!d) return "";
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return d as string;
+  return new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric" }).format(dt);
+}
 
 const makeFolder = (path: string): FolderNode => ({
   id: crypto.randomUUID(),
@@ -185,7 +221,9 @@ function OverviewPanel({
         {!editing ? (
           <>
             <p className="mt-2 whitespace-pre-wrap">{overview.description || "No description yet."}</p>
-            <div className="mt-2 text-sm text-gray-600">{overview.deadline ? `Deadline: ${overview.deadline}` : "No deadline."}</div>
+            <div className="mt-2 text-sm text-gray-600">
+              {overview.deadline ? <>Deadline: <time dateTime={overview.deadline}>{fmtDate(overview.deadline)}</time></> : "No deadline."}
+            </div>
           </>
         ) : (
           <>
@@ -257,7 +295,7 @@ function ChatPanel({ messages, onSend, readOnly }: { messages: Message[]; onSend
   );
 }
 
-/* ========= Tasks (wired to REST API) ========= */
+/* ========= Tasks ========= */
 function TaskCard({ task, onChange, onDelete, onMove, readOnly }: {
   task: Task;
   onChange: (patch: Partial<Task>) => void;
@@ -267,13 +305,16 @@ function TaskCard({ task, onChange, onDelete, onMove, readOnly }: {
 }) {
   const [edit, setEdit] = useState(false);
   const [titleDraft, setTitleDraft] = useState(task.title);
-  const [dueDraft, setDueDraft] = useState(task.due ?? "");
+  const [dueDraft, setDueDraft] = useState(task.due ? task.due.slice(0, 10) : "");
+
   return (
     <div className="border rounded-lg p-3 bg-gray-50">
       {!edit ? (
         <>
           <div className="text-sm font-medium">{task.title}</div>
-          <div className="text-xs text-gray-600">{task.due ? `Due: ${task.due}` : "No due date"}</div>
+          <div className="text-xs text-gray-600">
+            {task.due ? <>Due: <time dateTime={task.due}>{fmtDate(task.due)}</time></> : "No due date"}
+          </div>
           <div className="mt-2 flex flex-wrap gap-2 items-center">
             <select
               className="border rounded px-2 py-1 text-xs"
@@ -418,7 +459,7 @@ function TasksPanel({ workspaceId, tasks, setTasks, readOnly }: {
   );
 }
 
-/* ========= Notes (server-backed with ETag & conflict) ========= */
+/* ========= Notes ========= */
 function NotesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?: boolean }) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -436,6 +477,7 @@ function NotesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?:
   async function load() {
     setErr(null); setLoading(true);
     try {
+      await ensureSession();
       const { etag, doc } = await getNotes(workspaceId);
       setEtag(etag); setDoc(doc); setDraft(doc.content);
     } catch (e: any) {
@@ -484,7 +526,6 @@ function NotesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?:
         </span>
         {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
         <div className="ml-auto flex gap-2">
-          <BtnSecondary onClick={() => setDraft(doc.content)} disabled={!dirty || readOnly}>Revert</BtnSecondary>
           <BtnPrimary onClick={onSave} disabled={!dirty || readOnly}>Save</BtnPrimary>
         </div>
       </div>
@@ -508,7 +549,7 @@ function NotesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?:
   );
 }
 
-/* ========= Files (server-backed: list/upload/download) ========= */
+/* ========= Files ========= */
 function FilesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?: boolean }) {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -517,6 +558,7 @@ function FilesPanel({ workspaceId, readOnly }: { workspaceId: string; readOnly?:
   async function refresh() {
     setErr(null);
     try {
+      await ensureSession();
       const items = await listFiles(workspaceId);
       setFiles(items);
     } catch (e: any) {
@@ -608,41 +650,142 @@ function TreeView({ node, selectedPath, onSelect, onToggle }: {
 function CodePanel({ readOnly }: { readOnly: boolean }) {
   const [root, setRoot] = useState<FolderNode>(() => {
     const r = makeFolder("");
-    insertFileAt(r, "", "README.md", `# Code space
+    insertFileAt(
+      r,
+      "",
+      "README.md",
+      `# Code space
 - Create folders/files anywhere
 - Upload files/folders
 - Edit with Monaco
-`);
+`
+    );
     insertFileAt(r, "src", "index.ts", `export const hello = (name: string) => "Hello " + name;`);
     return r;
   });
 
+  // GitHub modal state
+  const [ghOpen, setGhOpen] = useState(false);
+  const [ghChecking, setGhChecking] = useState(false);
+  const [ghConnected, setGhConnected] = useState<boolean | null>(null);
+  const [ghMe, setGhMe] = useState<{ login: string; name?: string; avatar_url?: string } | null>(null);
+  const [ghToken, setGhToken] = useState("");
+  const [ghRepos, setGhRepos] = useState<GHRepo[]>([]);
+  const [ghRepoSel, setGhRepoSel] = useState<GHRepo | null>(null);
+  const [ghBranches, setGhBranches] = useState<GHBranch[]>([]);
+  const [ghBranchSel, setGhBranchSel] = useState<string>("");
+  const [ghErr, setGhErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!ghOpen) return;
+    (async () => {
+      setGhErr(null);
+      setGhChecking(true);
+      try {
+        await ensureSession();
+        const me = await github.me();
+        setGhMe(me);
+        setGhConnected(true);
+
+        const repos = await github.repos();
+        setGhRepos(repos);
+
+        if (repos[0]) {
+          setGhRepoSel(repos[0]);
+          const [owner, repo] = repos[0].full_name.split("/");
+          const branches = await github.branches(owner, repo);
+          setGhBranches(branches);
+          setGhBranchSel(branches[0]?.name ?? "");
+        }
+      } catch {
+        setGhConnected(false);
+        setGhMe(null);
+      } finally {
+        setGhChecking(false);
+      }
+    })();
+  }, [ghOpen]);
+
+  async function handleSaveToken() {
+    try {
+      setGhErr(null);
+      if (!ghToken.trim()) { setGhErr("Enter a token"); return; }
+      await ensureSession();
+      await github.saveToken(ghToken.trim());
+      setGhToken("");
+
+      setGhChecking(true);
+      const me = await github.me();
+      setGhMe(me);
+      setGhConnected(true);
+
+      const repos = await github.repos();
+      setGhRepos(repos);
+      if (repos[0]) {
+        setGhRepoSel(repos[0]);
+        const [owner, repo] = repos[0].full_name.split("/");
+        const branches = await github.branches(owner, repo);
+        setGhBranches(branches);
+        setGhBranchSel(branches[0]?.name ?? "");
+      }
+    } catch (e: any) {
+      setGhErr(e?.message || String(e));
+      setGhConnected(false);
+    } finally {
+      setGhChecking(false);
+    }
+  }
+
+  async function handleRepoChange(fullName: string) {
+    const repo = ghRepos.find((r) => r.full_name === fullName) || null;
+    setGhRepoSel(repo);
+    setGhBranches([]);
+    setGhBranchSel("");
+    if (repo) {
+      const [owner, name] = repo.full_name.split("/");
+      const branches = await github.branches(owner, name);
+      setGhBranches(branches);
+      setGhBranchSel(branches[0]?.name ?? "");
+    }
+  }
+
   const [selectedPath, setSelectedPath] = useState<string>("src/index.ts");
-  const selectedNode = useMemo(() => findNodeByPath(root, selectedPath) as TreeNode | undefined, [root, selectedPath]);
+  const selectedNode = useMemo(
+    () => findNodeByPath(root, selectedPath) as TreeNode | undefined,
+    [root, selectedPath]
+  );
 
   const selectedFolderPath = useMemo(() => {
     if (!selectedNode) return "";
     if (selectedNode.kind === "folder") return selectedNode.path;
-    const parts = selectedNode.path.split("/"); parts.pop(); return parts.join("/");
+    const parts = selectedNode.path.split("/");
+    parts.pop();
+    return parts.join("/");
   }, [selectedNode]);
 
-  const setRootMapped = (fn: (n: TreeNode) => TreeNode) => setRoot((prev) => mapTree(prev, fn) as FolderNode);
+  const setRootMapped = (fn: (n: TreeNode) => TreeNode) =>
+    setRoot((prev) => mapTree(prev, fn) as FolderNode);
   const onSelect = (n: TreeNode) => setSelectedPath(n.path);
-  const onToggle = (id: string) => setRootMapped((n) => (n.kind === "folder" && n.id === id ? { ...n, isOpen: !n.isOpen } : n));
+  const onToggle = (id: string) =>
+    setRootMapped((n) => (n.kind === "folder" && n.id === id ? { ...n, isOpen: !n.isOpen } : n));
 
   const createFolderAt = (base: string) => {
     if (readOnly) return;
-    const name = prompt(`New folder name (under "${base || "/"}")?`); if (!name) return;
+    const name = prompt(`New folder name (under "${base || "/"}")?`);
+    if (!name) return;
     const next = structuredClone(root) as FolderNode;
     ensureFolder(next, [base, name].filter(Boolean).join("/"));
-    setRoot(next); setSelectedPath([base, name].filter(Boolean).join("/"));
+    setRoot(next);
+    setSelectedPath([base, name].filter(Boolean).join("/"));
   };
   const createFileAt = (base: string) => {
     if (readOnly) return;
-    const name = prompt(`New file name (under "${base || "/"}")? e.g. main.py`); if (!name) return;
+    const name = prompt(`New file name (under "${base || "/"}")? e.g. main.py`);
+    if (!name) return;
     const next = structuredClone(root) as FolderNode;
     const newPath = insertFileAt(next, base, name, "");
-    setRoot(next); setSelectedPath(newPath);
+    setRoot(next);
+    setSelectedPath(newPath);
   };
   const handleUpload = (fl: FileList | null, base: string) => {
     if (!fl || readOnly) return;
@@ -655,8 +798,14 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
       reader.onload = () => {
         const folderPath = finalPath.split("/").slice(0, -1).join("/");
         const fileName = finalPath.split("/").pop()!;
-        insertFileAt(next, folderPath, fileName, typeof reader.result === "string" ? reader.result : "");
-        setRoot(structuredClone(next)); setSelectedPath(finalPath);
+        insertFileAt(
+          next,
+          folderPath,
+          fileName,
+          typeof reader.result === "string" ? reader.result : ""
+        );
+        setRoot(structuredClone(next));
+        setSelectedPath(finalPath);
       };
       reader.readAsText(file);
     });
@@ -664,22 +813,42 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
 
   const renameSelected = () => {
     if (!selectedNode || readOnly) return;
-    const newName = prompt("New name:", (selectedNode as any).name); if (!newName) return;
+    const newName = prompt("New name:", (selectedNode as any).name);
+    if (!newName) return;
     const parent = selectedFolderPath;
     if (selectedNode.kind === "file") {
       const newPath = [parent, newName].filter(Boolean).join("/");
-      setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id ? { ...n, name: newName, path: newPath, language: detectLanguageByName(newName) } : n));
+      setRootMapped((n) =>
+        n.kind === "file" && n.id === (selectedNode as any).id
+          ? { ...n, name: newName, path: newPath, language: detectLanguageByName(newName) }
+          : n
+      );
       setSelectedPath(newPath);
     } else {
       const oldPrefix = selectedNode.path;
-      const newFolderPath = [parent.split("/").slice(0, -1).join("/"), newName].filter(Boolean).join("/");
+      const newFolderPath = [parent.split("/").slice(0, -1).join("/"), newName]
+        .filter(Boolean)
+        .join("/");
       setRootMapped((n) => {
         if (n.kind === "folder" && n.id === (selectedNode as any).id) {
           const transform = (cc: TreeNode): TreeNode => {
-            if (cc.kind === "folder") return { ...cc, path: (cc as FolderNode).path.replace(oldPrefix, newFolderPath), children: (cc as FolderNode).children.map(transform) };
-            return { ...(cc as FileNode), path: (cc as FileNode).path.replace(oldPrefix, newFolderPath) };
+            if (cc.kind === "folder")
+              return {
+                ...cc,
+                path: (cc as FolderNode).path.replace(oldPrefix, newFolderPath),
+                children: (cc as FolderNode).children.map(transform),
+              };
+            return {
+              ...(cc as FileNode),
+              path: (cc as FileNode).path.replace(oldPrefix, newFolderPath),
+            };
           };
-          return { ...(n as FolderNode), name: newName, path: newFolderPath, children: (n as FolderNode).children.map(transform) };
+          return {
+            ...(n as FolderNode),
+            name: newName,
+            path: newFolderPath,
+            children: (n as FolderNode).children.map(transform),
+          };
         }
         return n;
       });
@@ -690,7 +859,8 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
     if (!selectedNode || readOnly) return;
     if (!confirm(`Delete ${selectedNode.kind} "${(selectedNode as any).name}"? This cannot be undone.`)) return;
     const next = removeNodeById(root, (selectedNode as any).id);
-    setRoot(next); setSelectedPath("");
+    setRoot(next);
+    setSelectedPath("");
   };
 
   return (
@@ -699,30 +869,63 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
         <div className="border-b px-3 py-2 grid gap-2">
           <div className="text-xs text-gray-500">Target folder</div>
           <div className="flex items-center gap-2">
-            <select className="border rounded-md px-2 py-1 text-sm flex-1" value={selectedFolderPath} onChange={(e) => setSelectedPath(e.target.value)}>
+            <select
+              className="border rounded-md px-2 py-1 text-sm flex-1"
+              value={selectedFolderPath}
+              onChange={(e) => setSelectedPath(e.target.value)}
+            >
               {(() => {
                 const folders: FolderNode[] = [];
-                const walk = (n: TreeNode) => { if (n.kind === "folder") { folders.push(n as FolderNode); (n as FolderNode).children.forEach(walk); } };
+                const walk = (n: TreeNode) => {
+                  if (n.kind === "folder") {
+                    folders.push(n as FolderNode);
+                    (n as FolderNode).children.forEach(walk);
+                  }
+                };
                 walk(root);
-                return folders.sort((a,b) => (a.path || "/").localeCompare(b.path || "/"))
-                  .map((f) => <option key={f.id} value={f.path}>{f.path || "/"}</option>);
+                return folders
+                  .sort((a, b) => (a.path || "/").localeCompare(b.path || "/"))
+                  .map((f) => (
+                    <option key={f.id} value={f.path}>
+                      {f.path || "/"}
+                    </option>
+                  ));
               })()}
             </select>
-            <BtnSecondary className="h-8" onClick={() => createFolderAt(selectedFolderPath)} disabled={readOnly}>New folder</BtnSecondary>
-            <BtnSecondary className="h-8" onClick={() => createFileAt(selectedFolderPath)} disabled={readOnly}>New file</BtnSecondary>
+            <BtnSecondary className="h-8" onClick={() => createFolderAt(selectedFolderPath)} disabled={readOnly}>
+              New folder
+            </BtnSecondary>
+            <BtnSecondary className="h-8" onClick={() => createFileAt(selectedFolderPath)} disabled={readOnly}>
+              New file
+            </BtnSecondary>
           </div>
 
           <div className="flex items-center gap-2">
             <label className={`btn-secondary h-8 px-3 ${readOnly ? "opacity-60 cursor-not-allowed" : ""}`}>
               Upload files
-              <input type="file" multiple className="hidden" disabled={readOnly} onChange={(e) => handleUpload(e.target.files, selectedFolderPath)} />
+              <input
+                type="file"
+                multiple
+                className="hidden"
+                disabled={readOnly}
+                onChange={(e) => handleUpload(e.target.files, selectedFolderPath)}
+              />
             </label>
-            <label className={`btn-secondary h-8 px-3 ${readOnly ? "opacity-60 cursor-not-allowed" : ""}`} title="Upload folder">
+            <label
+              className={`btn-secondary h-8 px-3 ${readOnly ? "opacity-60 cursor-not-allowed" : ""}`}
+              title="Upload folder"
+            >
               Upload folder
-              <input type="file" multiple className="hidden" disabled={readOnly}
+              <input
+                type="file"
+                multiple
+                className="hidden"
+                disabled={readOnly}
                 // @ts-expect-error: Chromium only
-                webkitdirectory="" directory=""
-                onChange={(e) => handleUpload(e.target.files, selectedFolderPath)} />
+                webkitdirectory=""
+                directory=""
+                onChange={(e) => handleUpload(e.target.files, selectedFolderPath)}
+              />
             </label>
           </div>
         </div>
@@ -733,10 +936,19 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
 
       <section className="grid grid-rows-[auto,auto,1fr] min-h-0">
         <div className="border-b bg-white px-3 py-2 flex items-center gap-2">
-          <span className="text-sm text-gray-500 truncate">{selectedNode ? (selectedNode as any).path : "Select a file/folder"}</span>
+          <span className="text-sm text-gray-500 truncate">
+            {selectedNode ? (selectedNode as any).path : "Select a file/folder"}
+          </span>
           <div className="ml-auto flex items-center gap-2">
-            <BtnSecondary className="h-8" onClick={renameSelected} disabled={!selectedNode || readOnly}>Rename</BtnSecondary>
-            <Button className="h-8 border" onClick={deleteSelected} disabled={!selectedNode || readOnly}>Delete</Button>
+            <BtnSecondary className="h-8" onClick={() => setGhOpen(true)}>
+              GitHub
+            </BtnSecondary>
+            <BtnSecondary className="h-8" onClick={renameSelected} disabled={!selectedNode || readOnly}>
+              Rename
+            </BtnSecondary>
+            <Button className="h-8 border" onClick={deleteSelected} disabled={!selectedNode || readOnly}>
+              Delete
+            </Button>
           </div>
         </div>
 
@@ -750,9 +962,11 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
                 const newName = e.target.value;
                 const parent = (selectedNode as any).path.split("/").slice(0, -1).join("/");
                 const newPath = [parent, newName].filter(Boolean).join("/");
-                setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id
-                  ? { ...(n as FileNode), name: newName, path: newPath, language: detectLanguageByName(newName) }
-                  : n));
+                setRootMapped((n) =>
+                  n.kind === "file" && n.id === (selectedNode as any).id
+                    ? { ...(n as FileNode), name: newName, path: newPath, language: detectLanguageByName(newName) }
+                    : n
+                );
                 setSelectedPath(newPath);
               }}
               readOnly={readOnly}
@@ -766,7 +980,13 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
               height="100%"
               language={(selectedNode as any).language}
               value={(selectedNode as FileNode).value}
-              onChange={(v) => setRootMapped((n) => (n.kind === "file" && n.id === (selectedNode as any).id ? { ...(n as FileNode), value: v ?? "" } : n))}
+              onChange={(v) =>
+                setRootMapped((n) =>
+                  n.kind === "file" && n.id === (selectedNode as any).id
+                    ? { ...(n as FileNode), value: v ?? "" }
+                    : n
+                )
+              }
               options={{ readOnly, fontSize: 14, minimap: { enabled: false }, automaticLayout: true, padding: { top: 12 } }}
               theme="vs"
             />
@@ -777,6 +997,91 @@ function CodePanel({ readOnly }: { readOnly: boolean }) {
           )}
         </div>
       </section>
+
+      {/* --- GitHub Modal --- */}
+      {ghOpen && (
+        <Modal onClose={() => setGhOpen(false)} title="GitHub integration">
+          <div className="p-4 space-y-4">
+            {ghChecking && <div className="text-sm">Checking GitHub connection…</div>}
+            {ghErr && <div className="text-sm text-red-600">{ghErr}</div>}
+
+            {ghConnected ? (
+              <>
+                <div className="flex items-center gap-3">
+                  {ghMe?.avatar_url && <img src={ghMe.avatar_url} alt="" className="w-8 h-8 rounded-full" />}
+                  <div className="text-sm">
+                    Connected as <strong>{ghMe?.login}</strong>
+                    {ghMe?.name ? ` (${ghMe.name})` : ""}
+                  </div>
+                </div>
+
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <label className="grid gap-1">
+                    <span className="text-xs text-gray-600">Repository</span>
+                    <select
+                      className="input"
+                      value={ghRepoSel?.full_name || ""}
+                      onChange={(e) => handleRepoChange(e.target.value)}
+                    >
+                      {ghRepos.map((r) => (
+                        <option key={r.id} value={r.full_name}>
+                          {r.full_name} {r.private ? "🔒" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="grid gap-1">
+                    <span className="text-xs text-gray-600">Branch</span>
+                    <select
+                      className="input"
+                      value={ghBranchSel}
+                      onChange={(e) => setGhBranchSel(e.target.value)}
+                    >
+                      {ghBranches.map((b) => (
+                        <option key={b.name} value={b.name}>
+                          {b.name}
+                          {b.protected ? " (protected)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <BtnSecondary className="h-9" disabled title="Coming next">
+                    Pull (soon)
+                  </BtnSecondary>
+                  <BtnPrimary className="h-9" disabled title="Coming next">
+                    Push (soon)
+                  </BtnPrimary>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-sm text-gray-700">
+                  Paste a GitHub token (fine-grained PAT with <em>Contents: Read &amp; write</em> on your repo).
+                </div>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder="ghp_…"
+                  value={ghToken}
+                  onChange={(e) => setGhToken(e.target.value)}
+                />
+                <div className="flex gap-2">
+                  <BtnPrimary className="h-9" onClick={handleSaveToken} disabled={!ghToken.trim()}>
+                    Save token
+                  </BtnPrimary>
+                  <BtnSecondary className="h-9" onClick={() => setGhOpen(false)}>
+                    Close
+                  </BtnSecondary>
+                </div>
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -795,19 +1100,27 @@ export default function CoveWorkspacePage() {
         await ensureSession();
         const data = await apiListTasks(workspaceId);
         setTasks(data);
-      } catch { /* silent */ }
+      } catch {
+        /* silent */
+      }
     })();
   }, [workspaceId, tab, setTasks]);
 
   const onSend = (text: string) =>
-    setMessages((m) => [...m, { id: crypto.randomUUID(), author: "You", text, at: new Date().toTimeString().slice(0,5) }]);
+    setMessages((m) => [...m, { id: crypto.randomUUID(), author: "You", text, at: new Date().toTimeString().slice(0, 5) }]);
 
   return (
     <div className="min-h-screen grid grid-cols-1 md:grid-cols-[16rem,1fr] bg-gray-50 text-gray-900">
       <Sidebar tab={tab} setTab={setTab} />
       <main className="min-h-0 grid">
         {tab === "Overview" && (
-          <OverviewPanel readOnly={readOnly} members={members} setMembers={setMembers} overview={overview} setOverview={setOverview} />
+          <OverviewPanel
+            readOnly={readOnly}
+            members={members}
+            setMembers={setMembers}
+            overview={overview}
+            setOverview={setOverview}
+          />
         )}
         {tab === "Chat" && <ChatPanel messages={messages} onSend={onSend} readOnly={readOnly} />}
         {tab === "Tasks" && workspaceId && (

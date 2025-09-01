@@ -12,6 +12,8 @@ export default function SignIn() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
@@ -27,10 +29,9 @@ export default function SignIn() {
   }
 
   function signInWithGoogle() {
-    // <-- THIS is where ${API_BASE}/auth/google/start goes.
     window.location.href = `${API_BASE}/auth/google/start`;
   }
-
+  
   return (
     <div className="min-h-screen grid place-items-center bg-gray-50 p-4">
       <form className="w-full max-w-md bg-white border rounded-2xl p-6 shadow-soft" onSubmit={onSubmit}>

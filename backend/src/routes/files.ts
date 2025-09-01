@@ -1,4 +1,5 @@
-import { FastifyInstance } from "fastify";
+// backend/src/routes/files.ts
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { Role } from "@prisma/client";
 import { requireWorkspaceRole } from "../guards/workspace.js";
@@ -15,15 +16,39 @@ export default async function filesRoutes(app: FastifyInstance) {
   const bucket = process.env.S3_BUCKET || "covestack";
   await ensureBucket(bucket);
 
-  // Request a presigned POST (editor+)
+  // 1) LIST files (viewer+)
+  //    ⇢ matches frontend GET /workspaces/:workspaceId/files
+  app.get(
+    "/workspaces/:workspaceId/files",
+    { preHandler: requireWorkspaceRole(Role.VIEWER) },
+    async (req) => {
+      const { workspaceId } = req.params as { workspaceId: string };
+      return app.prisma.file.findMany({
+        where: { workspaceId },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          name: true,
+          mime: true,
+          size: true,
+          createdAt: true,
+          storageKey: true,
+          createdBy: { select: { name: true, email: true } },
+        },
+      });
+    }
+  );
+
+  // 2) REQUEST a presigned POST (editor+)
+  //    ⇢ matches frontend POST /workspaces/:id/files
   app.post<{ Params: { id: string }; Body: z.infer<typeof CreateFileDto> }>(
     "/workspaces/:id/files",
     { preHandler: requireWorkspaceRole(Role.EDITOR) },
-    async (req, reply) => {
-      await req.jwtVerify();
-      const { id: workspaceId } = req.params;
-      const body = CreateFileDto.parse(req.body);
-      const user = req.user as { id: string };
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      await (req as any).jwtVerify();
+      const { id: workspaceId } = req.params as { id: string };
+      const body = CreateFileDto.parse((req as any).body ?? {});
+      const user = (req as any).user as { id: string };
 
       const safeName = body.name.replace(/\s+/g, "_");
       const key = `${workspaceId}/${Date.now()}-${randomUUID()}-${safeName}`;
@@ -45,8 +70,9 @@ export default async function filesRoutes(app: FastifyInstance) {
     }
   );
 
-  // Get a signed download URL (viewer+)
-  app.get("/files/:id", async (req, reply) => {
+  // 3) DOWNLOAD (redirect to signed URL) (viewer+)
+  //    ⇢ matches frontend anchor <a href={`${API_BASE}/files/:id`}>
+  app.get("/files/:id", async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
     const file = await app.prisma.file.findUnique({
       where: { id },
@@ -54,9 +80,14 @@ export default async function filesRoutes(app: FastifyInstance) {
     });
     if (!file) return reply.code(404).send({ message: "File not found" });
 
-    try { await req.jwtVerify(); } catch { return reply.code(401).send({ message: "Invalid token" }); }
-    const user = req.user as { id: string };
+    try {
+      await (req as any).jwtVerify();
+    } catch {
+      return reply.code(401).send({ message: "Invalid token" });
+    }
+    const user = (req as any).user as { id: string };
 
+    // check membership
     const member = await app.prisma.member.findUnique({
       where: { workspaceId_userId: { workspaceId: file.workspaceId, userId: user.id } },
       select: { role: true },
@@ -64,11 +95,11 @@ export default async function filesRoutes(app: FastifyInstance) {
     if (!member) return reply.code(403).send({ message: "Not a member of this workspace" });
 
     const downloadUrl = await signGetUrl(bucket, file.storageKey);
-    return { file, downloadUrl };
+    return reply.redirect(downloadUrl); // <— redirect so browser downloads
   });
 
-  // Delete a file (admin+)
-  app.delete("/files/:id", async (req, reply) => {
+  // 4) DELETE (admin+)
+  app.delete("/files/:id", async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
     const file = await app.prisma.file.findUnique({
       where: { id },
@@ -76,8 +107,12 @@ export default async function filesRoutes(app: FastifyInstance) {
     });
     if (!file) return reply.code(404).send({ message: "File not found" });
 
-    try { await req.jwtVerify(); } catch { return reply.code(401).send({ message: "Invalid token" }); }
-    const user = req.user as { id: string };
+    try {
+      await (req as any).jwtVerify();
+    } catch {
+      return reply.code(401).send({ message: "Invalid token" });
+    }
+    const user = (req as any).user as { id: string };
 
     const member = await app.prisma.member.findUnique({
       where: { workspaceId_userId: { workspaceId: file.workspaceId, userId: user.id } },
@@ -87,7 +122,6 @@ export default async function filesRoutes(app: FastifyInstance) {
       return reply.code(403).send({ message: "Insufficient role" });
     }
 
-    const bucket = process.env.S3_BUCKET || "covestack";
     await deleteObject(bucket, file.storageKey);
     await app.prisma.file.delete({ where: { id } });
     return { ok: true };

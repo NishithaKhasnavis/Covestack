@@ -1,24 +1,34 @@
-// src/lib/auth.ts
+// frontend/src/lib/auth.ts
 import { API_BASE } from "./api";
 
 export type User = { id: string; email: string; name?: string; avatarUrl?: string };
+
 const LS_USER = "covestack:user";
 
 export function getUser(): User | null {
-  const raw = localStorage.getItem(LS_USER);
-  return raw ? (JSON.parse(raw) as User) : null;
+  try {
+    const raw = localStorage.getItem(LS_USER);
+    return raw ? (JSON.parse(raw) as User) : null;
+  } catch {
+    return null;
+  }
 }
+
 function setUser(u: User | null) {
-  if (!u) localStorage.removeItem(LS_USER);
-  else localStorage.setItem(LS_USER, JSON.stringify(u));
+  if (u) localStorage.setItem(LS_USER, JSON.stringify(u));
+  else localStorage.removeItem(LS_USER);
 }
 
 export async function ensureSession(): Promise<User | null> {
-  const res = await fetch(`${API_BASE}/me`, { credentials: "include" });
-  if (!res.ok) { setUser(null); return null; }
-  const u = (await res.json()) as User;
-  setUser(u);
-  return u;
+  try {
+    const res = await fetch(`${API_BASE}/auth/me`, { credentials: "include" });
+    if (!res.ok) return null;
+    const user = (await res.json()) as User;
+    setUser(user);
+    return user;
+  } catch {
+    return null;
+  }
 }
 
 export async function signInPasscode(name: string, email: string, passcode: string) {

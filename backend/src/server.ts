@@ -14,7 +14,7 @@ import workspaceRoutes from "./routes/workspaces.js";
 import tasksRoutes from "./routes/tasks.js";
 import notesRoutes from "./routes/notes.js";
 import filesRoutes from "./routes/files.js";
-import googleRoutes from "./routes/google.js";
+//import googleRoutes from "./routes/google.js";
 import githubRoutes from "./routes/github.js";
 import oauthPlugin from "./plugins/oauth.js";
 
@@ -22,11 +22,16 @@ const app = Fastify({ logger: true });
 
 // CORS: allow credentials + all verbs we use
 await app.register(cors, {
-  origin: (origin, cb) => cb(null, true), // dev: allow all
+  // dev: allow all origins (or set to your FRONTEND_ORIGIN)
+  origin: (origin, cb) => cb(null, true),
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  // allow optimistic-lock header from Notes PUT
+  allowedHeaders: ["Content-Type", "Authorization", "If-Match"],
+  // let the browser read the ETag we return
+  exposedHeaders: ["ETag"],
 });
+
 
 await app.register(cookie);
 await app.register(jwt, {
@@ -35,13 +40,15 @@ await app.register(jwt, {
 });
 
 // decorate auth preHandler
+import type { FastifyRequest, FastifyReply } from "fastify";
+
 app.decorate(
   "authenticate",
-  async function (request: any, reply: any) {
+  async function (req: FastifyRequest, reply: FastifyReply) {
     try {
-      await request.jwtVerify();
+      await req.jwtVerify(); // populates req.user
     } catch {
-      reply.code(401).send({ message: "Unauthorized" });
+      return reply.code(401).send({ message: "Unauthorized" });
     }
   }
 );
@@ -65,7 +72,7 @@ await app.register(workspaceRoutes);
 await app.register(tasksRoutes);
 await app.register(notesRoutes);
 await app.register(filesRoutes);
-await app.register(googleRoutes);
+//await app.register(googleRoutes);
 await app.register(githubRoutes);
 
 const port = Number(process.env.PORT || 3000);
@@ -75,8 +82,9 @@ app.listen({ port, host: "0.0.0.0" }).catch((err) => {
 });
 
 // Type augmentation so TS knows about app.authenticate
+
 declare module "fastify" {
   interface FastifyInstance {
-    authenticate: any;
+    authenticate: (req: FastifyRequest, reply: FastifyReply) => Promise<any>;
   }
 }
