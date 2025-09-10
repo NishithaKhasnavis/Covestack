@@ -22,12 +22,14 @@
     "dotenv": "^17.2.1",
     "fastify": "^5.5.0",
     "ioredis": "^5.7.0",
+    "nodemailer": "^7.0.6",
     "octokit": "^5.0.3",
     "pino": "^9.9.0",
     "zod": "^4.1.1"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "@types/nodemailer": "^7.0.1",
     "tsx": "^4.20.5"
   }
 }
