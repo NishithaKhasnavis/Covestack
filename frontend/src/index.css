@@ -11,3 +11,4 @@ body { @apply bg-gray-50 text-gray-900 antialiased; }
 .btn-secondary { @apply btn border border-gray-300 bg-white hover:bg-gray-50 focus:ring-gray-300; }
 .input { @apply flex-1 px-3 py-2 rounded-lg border outline-none focus:ring-2 focus:ring-brand-500; }
 .card { @apply bg-white border rounded-2xl shadow-soft; }
+/*ok*/
