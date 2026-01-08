@@ -5,7 +5,7 @@ import cookie from "@fastify/cookie";
 import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
 import "dotenv/config";
-
+//j
 import prismaPlugin from "./plugins/prisma.js";
 import redisPlugin from "./plugins/redis.js";
 import oauthPlugin from "./plugins/oauth.js";
